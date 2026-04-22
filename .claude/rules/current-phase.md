@@ -1,47 +1,45 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 3 — Security-Core (Hook + Allow/Deny + Redaction)
-**Aktiver Checkpoint**: C3.0 (Phase-3-Rules schreiben, User-Freigabe einholen)
-**Letzter abgeschlossener Checkpoint**: C2.8 (Phase-2-Verifikation)
+**Aktiver Checkpoint**: C3.3 (Redaction-Pipeline, 4 Stages)
+**Letzter abgeschlossener Checkpoint**: C3.2 (Deny-Patterns + PIN-Rückfrage, End-to-End)
 
-## Phase 2 abgeschlossen ✅
+## Phase 3 — bisheriger Fortschritt
 
-Alle 8 Checkpoints grün, Phase 2 komplett gebaut und verifiziert.
+- ✅ C3.1 — `hooks/pre_tool.py` + Shared-Secret-IPC-Endpoint auf `127.0.0.1:8001`
+- ✅ C3.2 — Deny-Patterns + PIN-Rückfrage:
+  - `domain/deny_patterns.py` (17 Patterns + robuster Matcher, 71 Unit-Tests)
+  - `domain/hook_decisions.evaluate_bash` (Spec §12 Decision-Matrix)
+  - `domain/pending_confirmations.py` + Port + SQLite-Adapter (15 Unit-Tests)
+  - `application/confirmation_coordinator.py` (Futures + WhatsApp + DB)
+  - `application/hook_service.py` rewritten (async, optional-deps)
+  - `http/meta_webhook.py` intercepts PIN / "nein" vor Command-Router
+  - Hook-Endpoint async + fail-closed bei Service-Crash
+  - `tests/fixtures/deny/*.json` — 17 Fixtures
+  - `tests/integration/test_deny_patterns_e2e.py` — 20 E2E-Cases (YOLO + deny)
 
-- ✅ C2.1 — `/new <name>` empty + `/ls`
-- ✅ C2.2 — `/new <name> git <url>` + URL-Whitelist + Smart-Detection-Stub
-- ✅ C2.3 — Smart-Detection für alle 9 Artefakt-Stacks
-- ✅ C2.4 — `/allow batch approve` + `/allow batch review`
-- ✅ C2.5 — `/allow <pat>` + `/deny <pat>` + `/allowlist` + `/p`/`/p <name>`
-- ✅ C2.6 — URL-Whitelist (in C2.2 + C2.8-Smoke abgedeckt)
-- ✅ C2.7 — `/rm <n>` mit 60s-Confirm + PIN + Trash
-- ✅ C2.8 — Tests grün + Domain-Coverage 100 % + Smoke 18/18
+**Tests**: 562/562 passing, mypy --strict clean auf whatsbot/ + C3.2-Tests, ruff clean.
 
-**Tests**: 373/373 passing, mypy --strict clean, ruff clean.
-**Smoke**: `tests/smoke_phase2.py` — 18/18 grün (in-process, temp-Dir, :memory:).
+## Was als Nächstes (C3.3 → C3.6)
 
-## Was als Nächstes zu tun ist (Phase 3, Start)
+Verbleibende C3-Checkpoints aus `phase-3.md`:
 
-Phase 3 ist **Security-Core** (Hook + Allow/Deny-Enforcement + Redaction),
-parallelisierbar mit Phase 2 wäre gewesen — da Phase 2 jetzt durch ist,
-starte Phase 3 sequentiell.
+- **C3.3** — Redaction-Pipeline 4 Stages (Spec §10):
+  - Stage 1: bekannte Key-Muster (AWS, GitHub, OpenAI, Stripe, JWT, Bearer)
+  - Stage 2: strukturell (`KEY=VALUE`, PEM, SSH-Privates, DB-URLs)
+  - Stage 3: Entropy (Shannon > 4.5, ≥40 Zeichen)
+  - Stage 4: Pfade (`~/.ssh`, `~/.aws`, Keychain)
+  - Integration: jede ausgehende WhatsApp-Nachricht durchreichen
+- **C3.4** — Input-Sanitization wrappt verdächtige Prompts (nur Normal-Mode)
+- **C3.5** — Output-Size-Warning + `/send` / `/discard` / `/save`
+- **C3.6** — Fail-closed bei Unreachable/401/Crash/Timeout (bereits weitgehend
+  drin; expliziter Integration-Test fehlt noch)
 
-Laut `phase-2.md`-Konvention + `phases-3-to-9.md`:
-
-1. **Erst `.claude/rules/phase-3.md` schreiben** — gleiche Struktur wie
-   `phase-1.md` und `phase-2.md` (Scope, Checkpoints mit Test-Commands,
-   Success-Criteria, Abbruch-Kriterien, Abgrenzung zu späteren Phasen),
-   basierend auf Spec §21 Phase 3 + Spec §7 / §10 / §12.
-2. **User-Freigabe einholen** bevor implementiert wird.
-3. Wichtigste Gotchas (aus `phases-3-to-9.md` + Spec §12):
-   - Hook-Shared-Secret zwischen `hooks/pre_tool.py` und Bot zwingend
-   - Hook-Endpoint bindet nur an `127.0.0.1:8001`
-   - Fail-closed für Bash bei Hook-Endpoint-Unreachable
-   - Die 17 Deny-Patterns aus Spec §12 exakt übernehmen
-   - PIN-Rückfrage-Flow mit 5min-Timeout + `pending_confirmations`-Tabelle
-   - Redaction-Pipeline 4 Stages: bekannte Keys → strukturelle Patterns →
-     Entropie → Pfade (Spec §10)
-   - Output-Size-Warning (>10KB) mit `/send` / `/discard` / `/save`
+Noch offen als Schuld aus C3.2:
+- Write-Hook hat noch den Stub-Pfad (`classify_write` = allow). Die echte
+  Path-Rules-Policy (Spec §12 Layer 3) ist im `phase-3.md`-Scope, aber nicht
+  als eigener Checkpoint vergeben — idealerweise als Teil von C3.3/C3.5
+  nachziehen.
 
 ## Format-Konvention für Updates
 
