@@ -82,9 +82,8 @@ typecheck: ## mypy --strict
 
 # ---- Operations -------------------------------------------------------------
 
-setup-secrets: ## Interaktiv die 7 Keychain-Secrets setzen (kommt in C1.2)
-	@echo "TODO Phase 1 C1.2: bin/setup-secrets.sh"
-	@exit 1
+setup-secrets: ## Interaktiv die 7 Keychain-Secrets setzen
+	bash bin/setup-secrets.sh
 
 deploy-launchd: ## LaunchAgent + Backup-Agent registrieren (kommt in C1.4)
 	@echo "TODO Phase 1 C1.4: launchd templates + launchctl load"
@@ -94,11 +93,11 @@ undeploy-launchd: ## LaunchAgent + Backup-Agent abmelden
 	@echo "TODO Phase 1 C1.4: launchctl unload"
 	@exit 1
 
-reset-db: ## State-DB neu anlegen (DESTRUCTIVE — nur Dev)
+reset-db: ## State-DB neu anlegen mit frischem Schema (DESTRUCTIVE — nur Dev)
 	@echo "⚠️  This deletes $(DB_PATH). Press Ctrl+C to abort, Enter to continue."
 	@read _
 	rm -f $(DB_PATH) $(DB_PATH)-wal $(DB_PATH)-shm
-	@echo "TODO Phase 1 C1.2: apply sql/schema.sql"
+	$(PY) -c "from whatsbot.adapters.sqlite_repo import open_state_db; open_state_db().close(); print('✅ state.db (re)created with fresh schema')"
 
 backup-db: ## SQLite .backup nach ~/Backups/whatsbot/state.db.<date> (kommt in C1.7)
 	@echo "TODO Phase 1 C1.7: bin/backup-db.sh"
