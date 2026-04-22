@@ -19,6 +19,7 @@ from fastapi.responses import PlainTextResponse
 
 import whatsbot
 from whatsbot.adapters.keychain_provider import KeychainProvider
+from whatsbot.adapters.redacting_sender import RedactingMessageSender
 from whatsbot.adapters.sqlite_allow_rule_repository import (
     SqliteAllowRuleRepository,
 )
@@ -31,10 +32,12 @@ from whatsbot.adapters.sqlite_pending_confirmation_repository import (
 from whatsbot.adapters.sqlite_pending_delete_repository import (
     SqlitePendingDeleteRepository,
 )
+from whatsbot.adapters.sqlite_pending_output_repository import (
+    SqlitePendingOutputRepository,
+)
 from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
 from whatsbot.adapters.sqlite_repo import open_state_db
 from whatsbot.adapters.subprocess_git_clone import SubprocessGitClone
-from whatsbot.adapters.redacting_sender import RedactingMessageSender
 from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
 from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.allow_service import AllowService
@@ -42,6 +45,7 @@ from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.application.delete_service import DeleteService
 from whatsbot.application.hook_service import HookService
+from whatsbot.application.output_service import OutputService
 from whatsbot.application.project_service import ProjectService
 from whatsbot.config import Environment, Settings, assert_secrets_present
 from whatsbot.domain import whitelist
@@ -151,6 +155,16 @@ def create_app(
         default_recipient=default_recipient,
     )
 
+    # Output-size guard (Spec §10) — >10KB bodies get stashed under
+    # ``<data-dir>/outputs/<msg_id>.md`` and the user sees a /send |
+    # /discard | /save dialog instead.
+    outputs_dir = settings.db_path.parent / "outputs"
+    output_service = OutputService(
+        sender=sender,
+        repo=SqlitePendingOutputRepository(conn),
+        outputs_dir=outputs_dir,
+    )
+
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
@@ -179,6 +193,7 @@ def create_app(
             sender=sender,
             command_handler=command_handler,
             coordinator=coordinator,
+            output_service=output_service,
         )
     )
     # Stash the coordinator on the app state so ``create_hook_app``

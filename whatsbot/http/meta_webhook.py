@@ -35,6 +35,7 @@ from fastapi.responses import PlainTextResponse
 
 from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
+from whatsbot.application.output_service import OutputService, ResolveOutcome
 from whatsbot.config import Environment, Settings
 from whatsbot.domain import whitelist
 from whatsbot.domain.injection import detect_triggers
@@ -138,6 +139,7 @@ def build_router(
     sender: MessageSender,
     command_handler: CommandHandler,
     coordinator: ConfirmationCoordinator | None = None,
+    output_service: OutputService | None = None,
 ) -> APIRouter:
     """Construct the ``/webhook`` APIRouter with the dependencies wired in.
 
@@ -263,16 +265,71 @@ def build_router(
                         sender.send_text(to=msg.sender, body=reply)
                         continue
 
+                # /send, /discard, /save act on the most recent
+                # pending_outputs row. They're intercepted here (not
+                # in CommandHandler) because the sender phone number
+                # is known at this layer, and the resolution steps
+                # need to actually ship or unlink content rather than
+                # just return a string reply.
+                if output_service is not None:
+                    stripped = msg.text.strip()
+                    if stripped in ("/send", "/discard", "/save"):
+                        outcome = _resolve_pending_output(
+                            stripped, to=msg.sender, service=output_service
+                        )
+                        sender.send_text(
+                            to=msg.sender, body=_format_output_outcome(outcome, stripped)
+                        )
+                        log.info(
+                            "pending_output_resolved",
+                            action=stripped,
+                            outcome=outcome.kind,
+                            msg_id=outcome.msg_id,
+                        )
+                        continue
+
                 result = command_handler.handle(msg.text)
                 log.info(
                     "command_routed",
                     command=result.command,
                     reply_len=len(result.reply),
                 )
-                sender.send_text(to=msg.sender, body=result.reply)
+                if output_service is not None:
+                    output_service.deliver(to=msg.sender, body=result.reply)
+                else:
+                    sender.send_text(to=msg.sender, body=result.reply)
             finally:
                 structlog.contextvars.unbind_contextvars("wa_msg_id", "sender")
 
         return Response(status_code=status.HTTP_200_OK)
 
     return router
+
+
+def _resolve_pending_output(
+    action: str, *, to: str, service: OutputService
+) -> ResolveOutcome:
+    if action == "/send":
+        return service.resolve_send(to=to)
+    if action == "/discard":
+        return service.resolve_discard(to=to)
+    if action == "/save":
+        return service.resolve_save(to=to)
+    # Not reachable — caller validates.
+    raise ValueError(f"unknown output action: {action!r}")
+
+
+def _format_output_outcome(outcome: ResolveOutcome, action: str) -> str:
+    if outcome.kind == "none":
+        return "Kein wartender Output."
+    if outcome.kind == "missing":
+        return "⚠️ Gespeicherter Output nicht mehr auf der Platte."
+    if outcome.kind == "sent":
+        chunks = outcome.chunks_sent or 1
+        return f"✅ Gesendet ({outcome.size_bytes} bytes, {chunks} chunk(s))."
+    if outcome.kind == "discarded":
+        return "🗑 Verworfen."
+    if outcome.kind == "saved":
+        return "💾 Gespeichert (nur auf der Platte)."
+    # Defensive — future-proof if ResolveKind grows.
+    return f"OK ({action}: {outcome.kind})"
