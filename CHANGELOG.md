@@ -5,7 +5,29 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
-### Phase 2 — Projekt-Management + Smart-Detection (in progress)
+### Phase 2 — Projekt-Management + Smart-Detection ✅ (complete)
+
+#### C2.8 — Phase-2-Verifikation ✅
+
+- `make test` komplett grün: **373/373** Unit + Integration-Tests.
+- **Domain-Core-Coverage 100 %** (`whatsbot/domain/*`), Ziel war >80 %.
+  `allow_rules`, `commands`, `git_url`, `pending_deletes`, `projects`,
+  `smart_detection`, `whitelist` haben jeweils 100 % Statement- und
+  Branch-Coverage.
+- `mypy --strict whatsbot/` clean, ruff format/lint clean.
+- **In-process Smoke** (`tests/smoke_phase2.py`): 18/18 Checks grün.
+  Deckt ab: `/new <name>`, `/new <name> git <url>`, Smart-Detection
+  (12 Vorschläge aus npm + git), `/p` active-project, `/allow batch
+  review` + `approve`, `/allow <pat>` manual, `/allowlist` (Sources),
+  `/deny <pat>`, URL-Whitelist blockt nicht-gewhitelistete Hosts,
+  `/rm <name>` 60s-Fenster, falsche PIN behält Projekt + Pending-Row,
+  richtige PIN verschiebt nach Trash, `/ls` reflektiert den Delete,
+  Unknown-Command-Fallback. Läuft komplett in einem Temp-Dir mit
+  In-Memory-DB — kein Keychain, kein Netz, keine Nebenwirkungen.
+- Smoke bestätigt die Hexagonal-Schicht-Invariante: der CommandHandler
+  treibt die komplette Phase-2-Oberfläche ohne LaunchAgent, ohne
+  Meta-Webhook, ohne Keychain — also sind Ports/Adapters sauber
+  getrennt.
 
 #### C2.7 — `/rm` mit 60s-Fenster, PIN + Trash ✅
 
