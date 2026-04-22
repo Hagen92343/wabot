@@ -58,3 +58,10 @@ launchd/*.plist
 # --- Local notes ---
 TODO.local.md
 NOTES.local.md
+
+# --- Defensive: paths starting with a URL scheme would only appear here
+# --- if a misconfigured test wrote them — never legitimate.
+https:/
+http:/
+ssh:/
+git@*
