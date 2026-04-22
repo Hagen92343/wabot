@@ -25,8 +25,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Final
 
@@ -34,8 +33,9 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import PlainTextResponse
 
+from whatsbot.application.command_handler import CommandHandler
 from whatsbot.config import Environment, Settings
-from whatsbot.domain import commands, whitelist
+from whatsbot.domain import whitelist
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.message_sender import MessageSender
 from whatsbot.ports.secrets_provider import (
@@ -133,9 +133,7 @@ def build_router(
     settings: Settings,
     secrets: SecretsProvider,
     sender: MessageSender,
-    started_at_monotonic: float,
-    version: str,
-    db_ok_callback: Callable[[], bool] | None = None,
+    command_handler: CommandHandler,
 ) -> APIRouter:
     """Construct the ``/webhook`` APIRouter with the dependencies wired in.
 
@@ -222,13 +220,7 @@ def build_router(
                     log.warning("sender_not_allowed")
                     continue
 
-                snapshot = commands.StatusSnapshot(
-                    version=version,
-                    uptime_seconds=time.monotonic() - started_at_monotonic,
-                    db_ok=(db_ok_callback() if db_ok_callback is not None else True),
-                    env=settings.env.value,
-                )
-                result = commands.route(msg.text, snapshot)
+                result = command_handler.handle(msg.text)
                 log.info(
                     "command_routed",
                     command=result.command,

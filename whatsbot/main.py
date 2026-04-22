@@ -9,7 +9,9 @@ ohne dass beim Import ein Side-Effect-Setup läuft.
 
 from __future__ import annotations
 
+import sqlite3
 import time
+from pathlib import Path
 from typing import Final
 
 from fastapi import FastAPI
@@ -17,7 +19,11 @@ from fastapi.responses import PlainTextResponse
 
 import whatsbot
 from whatsbot.adapters.keychain_provider import KeychainProvider
+from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
+from whatsbot.adapters.sqlite_repo import open_state_db
 from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
+from whatsbot.application.command_handler import CommandHandler
+from whatsbot.application.project_service import ProjectService
 from whatsbot.config import Environment, Settings, assert_secrets_present
 from whatsbot.http.meta_webhook import build_router as build_webhook_router
 from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddleware
@@ -32,6 +38,7 @@ def create_app(
     settings: Settings | None = None,
     secrets_provider: SecretsProvider | None = None,
     message_sender: MessageSender | None = None,
+    db_connection: sqlite3.Connection | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -64,6 +71,28 @@ def create_app(
 
     sender: MessageSender = message_sender if message_sender is not None else LoggingMessageSender()
 
+    # State DB: open once per process. In test env caller injects an
+    # in-memory connection; otherwise we use the real spec-§4 path.
+    conn = db_connection if db_connection is not None else _open_state_db_for(settings)
+
+    # Project store on disk: ~/projekte/<name>/. Configurable via env later
+    # if needed, hardcoded for now matching the spec default.
+    projects_root = Path.home() / "projekte"
+    projects_root.mkdir(parents=True, exist_ok=True)
+
+    project_service = ProjectService(
+        repository=SqliteProjectRepository(conn),
+        conn=conn,
+        projects_root=projects_root,
+    )
+
+    command_handler = CommandHandler(
+        project_service=project_service,
+        version=whatsbot.__version__,
+        started_at_monotonic=_started_at_monotonic,
+        env=settings.env.value,
+    )
+
     app = FastAPI(
         title="whatsbot",
         version=whatsbot.__version__,
@@ -80,8 +109,7 @@ def create_app(
             settings=settings,
             secrets=secrets_for_router,
             sender=sender,
-            started_at_monotonic=_started_at_monotonic,
-            version=whatsbot.__version__,
+            command_handler=command_handler,
         )
     )
 
@@ -106,6 +134,12 @@ def create_app(
         version=whatsbot.__version__,
     )
     return app
+
+
+def _open_state_db_for(settings: Settings) -> sqlite3.Connection:
+    """Open the spec-§4 state DB. Centralised so tests can monkeypatch
+    if they need to redirect production-path access."""
+    return open_state_db(db_path=settings.db_path, backup_dir=settings.backup_dir)
 
 
 class _EmptySecretsProvider:

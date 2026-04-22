@@ -5,6 +5,51 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
+### Phase 2 — Projekt-Management + Smart-Detection (in progress)
+
+#### C2.1 — `/new <name>` + `/ls` (empty projects) ✅
+- `whatsbot/domain/projects.py`: `Project` dataclass mirrors the spec-§19
+  ``projects`` row, `Mode`/`SourceMode` StrEnums, `validate_project_name`
+  (2-32 chars, lowercase + digits + `_`/`-`, no leading underscore, no
+  reserved words like `ls` / `new` / `.` / `..`), `format_listing` for
+  the `/ls` output with mode-emoji + active-marker.
+- `whatsbot/ports/project_repository.py`: Protocol + the two structured
+  errors (`ProjectAlreadyExistsError`, `ProjectNotFoundError`).
+- `whatsbot/adapters/sqlite_project_repository.py`: real SQLite-backed
+  CRUD; integrity-error disambiguation (duplicate name vs. CHECK
+  constraint trip).
+- `whatsbot/application/project_service.py`: `create_empty` (validate →
+  check duplicates in DB *and* on disk → mkdir → INSERT, with directory
+  rollback if INSERT fails); `list_all` with optional `active_name`
+  marker.
+- `whatsbot/application/command_handler.py`: refactor of
+  `domain.commands.route` into a stateful handler that owns the services.
+  Phase-1 commands (`/ping`/`/status`/`/help`) still delegate to the pure
+  `domain.commands.route`. New: `/new <name>` (with `/new <name> git
+  <url>` rejected with a clear "kommt in C2.2" hint), `/ls`.
+- `whatsbot/main.py`: opens the spec-§4 state DB once, builds
+  `ProjectService` + `CommandHandler`, hands them to `build_webhook_router`.
+  Tests pass an in-memory connection.
+- `whatsbot/http/meta_webhook.py`: `build_router` now takes a
+  `command_handler` instead of raw version/uptime/db-callback args.
+- Tests (66 new, 201 total): `test_projects` (15 — name validation, dataclass
+  defaults, listing format), `test_sqlite_project_repository` (12 — CRUD,
+  duplicate detection, CHECK constraints), `test_project_service` (10 —
+  filesystem layout, error paths, rollback on INSERT failure),
+  `test_command_handler` (12 — pass-through to phase-1 commands plus the
+  new `/new` and `/ls` paths). **Coverage 95.30%** (target ≥80%);
+  `main.py` 100%, `domain/projects.py` 100%, `application/*` 100%,
+  `adapters/sqlite_project_repository.py` 100%.
+- **Live-smoke verified** with a tmp DB + tmp `~/projekte/` against the
+  real `CommandHandler`:
+  - `/ls` (empty) → friendly hint
+  - `/new alpha` → DB row + dir layout (`alpha/`, `alpha/.whatsbot/`,
+    `alpha/.whatsbot/outputs/`) + structured `project_created` log line
+  - `/new BAD` → `⚠️ ... ist kein gueltiger Projektname...`
+  - `/new alpha` again → `⚠️ Projekt 'alpha' existiert schon.`
+  - `/new beta` → second project + dirs
+  - `/ls` → alphabetical listing with 🟢 (NORMAL) emoji.
+
 ### Phase 1 — Fundament + Echo-Bot ✅ (komplett)
 
 Alle 12 Success-Criteria aus `phase-1.md` erfüllt. Bot läuft als
