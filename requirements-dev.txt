@@ -1,0 +1,9 @@
+# whatsbot dev dependencies (tests, lint, type-check).
+-r requirements.txt
+
+pytest==8.*
+pytest-asyncio==0.24.*
+pytest-cov==6.*
+httpx==0.27.*           # FastAPI TestClient
+mypy==1.13.*
+ruff==0.7.*

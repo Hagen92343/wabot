@@ -1,0 +1,13 @@
+# whatsbot runtime dependencies (Phase 1 baseline).
+#
+# CRITICAL: NEVER add `claude-agent-sdk`. Spec §5 — vierfach verriegelt.
+# The bot drives Claude Code via tmux+CLI on a Max-20x subscription only.
+
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+pydantic==2.10.*
+structlog==24.4.*
+python-ulid==3.0.*
+keyring==25.*
+tenacity==9.*
+python-multipart==0.0.*
