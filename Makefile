@@ -102,9 +102,8 @@ reset-db: ## State-DB neu anlegen mit frischem Schema (DESTRUCTIVE — nur Dev)
 	rm -f $(DB_PATH) $(DB_PATH)-wal $(DB_PATH)-shm
 	$(PY) -c "from whatsbot.adapters.sqlite_repo import open_state_db; open_state_db().close(); print('✅ state.db (re)created with fresh schema')"
 
-backup-db: ## SQLite .backup nach ~/Backups/whatsbot/state.db.<date> (kommt in C1.7)
-	@echo "TODO Phase 1 C1.7: bin/backup-db.sh"
-	@exit 1
+backup-db: ## SQLite .backup nach ~/Backups/whatsbot/state.db.<date> (Retention 30 Tage)
+	bash bin/backup-db.sh
 
 # ---- Cleanup ----------------------------------------------------------------
 

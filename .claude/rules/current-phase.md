@@ -1,65 +1,67 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 1 – Fundament + Echo-Bot
-**Aktiver Checkpoint**: C1.7 (DB-Backup-Script)
-**Letzter abgeschlossener Checkpoint**: C1.5 (Webhook + Echo) + C1.6 (Tests grün)
+**Aktive Phase**: Phase 1 KOMPLETT — Phase 2 wartet auf User-Freigabe
+**Aktiver Checkpoint**: noch keiner
+**Letzter abgeschlossener Checkpoint**: C1.7 (DB-Backup-Script) — Phase 1 komplett
 
-## Hinweis zu C1.6
+## Phase-1-Abschluss
 
-C1.6 verlangt nur „`make test` grün + Coverage > 80% für domain/". C1.5
-liefert das bereits mit:
+Alle 12 Success-Criteria aus `phase-1.md` erfüllt:
 
-- **128 Tests grün** (49 davon neu in C1.5)
-- **Coverage 96.17% gesamt**
-- `domain/` 100% (`commands.py`, `whitelist.py`, alle `__init__.py`)
-- Kein neuer Code in C1.6 nötig — der Checkpoint ist mit C1.5 abgegolten.
-- Markiert in CHANGELOG als "C1.5 + C1.6".
+| # | Kriterium | Wo erfüllt |
+|---|-----------|------------|
+| 1 | Bot läuft als LaunchAgent, startet auto nach Login | C1.4 (live verifiziert) |
+| 2 | `/health` antwortet JSON | C1.3 (live) |
+| 3 | Meta-Signature-Check rejected ungültig (silent + log) | C1.5 (8 tests) |
+| 4 | Fremde Sender silent gedroppt | C1.5 (live + tests) |
+| 5 | `/ping` per Fixture → Echo | C1.5 (test_ping_fixture_routes_to_pong_reply) |
+| 6 | Alle 7 Keychain-Secrets ladbar | C1.2 (KeychainProvider + setup-secrets.sh) |
+| 7 | `PRAGMA integrity_check` bei Startup | C1.2 (open_state_db) |
+| 8 | Logs als JSON mit Correlation-ID | C1.3 (live in launchd-log) |
+| 9 | `make test` grün, >80% Domain-Coverage | 135/135 grün, 96.17% gesamt, domain 100% |
+| 10 | Tägliches DB-Backup-Script lauffähig | C1.7 (live verifiziert) |
+| 11 | `mypy --strict whatsbot/` grün | 18 source files, 0 issues |
+| 12 | CHANGELOG mit Phase-1-Einträgen | alle 7 Checkpoints dokumentiert |
 
-## Was als Nächstes zu tun ist (C1.7)
+## Was Phase 1 dem User liefert
 
-C1.7 laut `phase-1.md` §11 + §12:
+- Bot empfängt Meta WhatsApp Webhooks (signiert, sender-whitelisted)
+- Antwortet auf `/ping`, `/status`, `/help`
+- Läuft als macOS LaunchAgent (`make deploy-launchd ENV=prod DOMAIN=hagen`)
+- Tägliches DB-Backup um 03:00 mit 30-Tage-Retention
+- Strukturierte JSON-Logs mit ULID-Correlation-IDs
+- Hexagonal-Architektur, mypy strict, 96% Test-Coverage
 
-1. `bin/backup-db.sh` echt machen (aktuell Stub):
-   - `sqlite3 "$DB" ".backup '$BACKUP_DIR/state.db.$(date +%F)'"`
-   - `find "$BACKUP_DIR" -name 'state.db.*' -mtime +30 -delete`
-   - `set -euo pipefail`, structured JSON log line, exit 0/1 sauber
-   - Idempotent: existing backup mit gleichem Datum überschreiben (oder
-     skip with note)
-2. `Makefile`: `backup-db` Target ruft `bin/backup-db.sh`
-3. Tests: `tests/integration/test_backup_db.py` — schreibt Test-DB,
-   triggert Skript, asserted dass Backup existiert + parsable, asserted
-   dass alte Dateien (>30d simuliert) gelöscht werden
-4. Live-Smoke: `make backup-db` schreibt nach `~/Backups/whatsbot/state.db.<heute>`,
-   re-run löscht nichts (idempotent), file ist via `sqlite3 .schema` lesbar
+## Was Phase 1 noch NICHT liefert (kommt in späteren Phasen)
 
-Verifikation (C1.7 done):
-- `make backup-db` → erzeugt `state.db.YYYY-MM-DD` mit current schema
-- Re-run überschreibt sauber
-- Test-30d-File wird beim nächsten Lauf gelöscht
-- LaunchAgent `com.local.whatsbot.backup` läuft das Skript → kein stderr
+- Projekt-Verwaltung (`/new`, `/ls`, `/p`, `/rm`) — Phase 2
+- Pre-Tool-Hook + Allow/Deny-Rules — Phase 3
+- Claude-Launch in tmux + 3-Modi-System — Phase 4
+- Input-Lock + lokales Terminal preempt — Phase 5
+- Kill-Switch + Watchdog + Sleep-Handling — Phase 6
+- Bilder/PDF/Audio (Whisper) — Phase 7
+- Limit-Tracking + Metrics + `/log`/`/errors`/`/ps` — Phase 8
+- INSTALL/RUNBOOK/Docs + Smoke-Test — Phase 9
 
-## Phase-1-Endzustand nach C1.7
+## Nächster Schritt: User-Freigabe für Phase 2
 
-Phase 1 wäre dann komplett. Nach C1.7:
-- Update `current-phase.md`: "Phase 2 — Projekt-Management + Smart-Detection"
-- Sicherheitscheck: alle 12 Success-Criteria aus phase-1.md durchgehen
-- User-Freigabe abwarten bevor Phase 2 startet
+User entscheidet ob:
+- (a) Direkt mit Phase 2 weitermachen (`phase-2.md` ist bereits geschrieben)
+- (b) Erst `make setup-secrets` durchziehen + echten LaunchAgent-Run mit
+  `make deploy-launchd ENV=prod DOMAIN=hagen` testen, dann Phase 2
+- (c) Pause / Cleanup / sonstiges
+
+`phase-2.md` Scope: Projekt-Management (`/new`, `/ls`, `/p`, `/info`,
+`/rm`, `/cat`, `/tail`), Smart-Detection für `/new git`, Allow-Rule-
+Vorschläge, Trash-Mechanismus mit PIN. Aufwand: 2-3 Sessions.
 
 ## Format-Konvention für Updates
 
-Wenn du einen Checkpoint abschließt:
-
-```
-**Aktive Phase**: Phase 1 – Fundament + Echo-Bot
-**Aktiver Checkpoint**: noch keiner — Phase 1 komplett
-**Letzter abgeschlossener Checkpoint**: C1.7 (DB-Backup)
-```
-
-Bei ganzem Phasen-Wechsel:
+Wenn Phase 2 startet:
 
 ```
 **Aktive Phase**: Phase 2 – Projekt-Management + Smart-Detection
-**Aktiver Checkpoint**: noch keiner
+**Aktiver Checkpoint**: C2.1 (/new empty)
 **Letzter abgeschlossener Checkpoint**: C1.7 (DB-Backup) — Phase 1 komplett
 ```
 

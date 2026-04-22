@@ -5,7 +5,36 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
-### Phase 1 — Fundament + Echo-Bot (in progress)
+### Phase 1 — Fundament + Echo-Bot ✅ (komplett)
+
+Alle 12 Success-Criteria aus `phase-1.md` erfüllt. Bot läuft als
+LaunchAgent, antwortet auf Meta-Webhooks (signiert + whitelisted) mit
+Echo-Reply, und macht tägliches DB-Backup. Hexagonal-Architektur mit
+135 Tests grün und 96.17% Coverage.
+
+#### C1.7 — DB-Backup-Skript + Retention ✅
+- `bin/backup-db.sh`: echtes Skript statt Stub.
+  - Nutzt `VACUUM INTO` (SQLite 3.27+) statt `.backup`: produziert eine
+    konsolidierte Single-File-DB ohne `-wal`/`-shm` Sidecars,
+    read-consistent auch wenn der Bot währenddessen schreibt.
+  - Atomares `tmp → mv`: konkurrierende Reads sehen nie eine
+    halb-geschriebene Datei.
+  - `PRAGMA integrity_check` auf das frische Backup vor Publish, abort+
+    löschen bei Fehler statt silent garbage.
+  - 30-Tage-Retention via `find -mtime +N`. ENV-Variablen
+    `WHATSBOT_DB`/`WHATSBOT_BACKUP_DIR`/`WHATSBOT_BACKUP_RETENTION_DAYS`
+    machen das Skript test-isoliert.
+  - Strukturierte JSON-Logs (`backup_complete`/`backup_skipped_no_db`/
+    `backup_failed`/`backup_integrity_failed`), portable `stat` (BSD+GNU).
+- `Makefile backup-db`: Target ruft jetzt `bin/backup-db.sh` (statt Stub).
+- Tests: `tests/integration/test_backup_db.py` — 7 echte subprocess-Tests
+  (happy-path, intact schema, structured-log, idempotent same-day, skip
+  on missing DB, retention deletes >30d, retention spares <30d, retention=0
+  spares today's freshly-written backup). Alle grün.
+- **Live-Smoke verifiziert**: Test-DB seeded, `bash bin/backup-db.sh` →
+  `state.db.<heute>` 118KB, sqlite3 read-back zeigt seed-row, JSON-Log:
+  `{"event":"backup_complete","ts":"...","target":"...","size_bytes":118784,
+  "retention_days":30,"deleted_old":0}`.
 
 #### C1.5 — Webhook + Echo (Signatur, Whitelist, Command-Router) ✅
 - `whatsbot/domain/whitelist.py`: pure Parser für `allowed-senders` aus Spec
