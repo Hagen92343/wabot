@@ -1,8 +1,73 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 3 — Security-Core ✅ COMPLETE
-**Aktiver Checkpoint**: — (Phase 4 freigabebereit)
-**Letzter abgeschlossener Checkpoint**: C3.6 (Fail-closed Hook-Integration-Smoke)
+**Aktive Phase**: Phase 4 — Mode-System + Claude-Launch (in progress)
+**Aktiver Checkpoint**: **C4.1d** — SessionService.ensure_started + `/p`-Wiring + C4.1-Smoke
+**Letzter abgeschlossener Checkpoint**: C4.1c (TmuxController + Subprocess-Adapter)
+
+## Phase 4 — laufender Stand (zum Wiederaufnehmen)
+
+- ✅ **C4.1a** — `domain/modes.py` (claude_flags / status-colors / valid_transition)
+  + `domain/sessions.py` (ClaudeSession dataclass + context-fill-helpers)
+- ✅ **C4.1b** — `ports/claude_session_repository.py` +
+  `adapters/sqlite_claude_session_repository.py` (CRUD + 4 hot-path
+  partial updates: update_activity / bump_turn / update_mode /
+  mark_compact)
+- ✅ **C4.1c** — `ports/tmux_controller.py` +
+  `adapters/tmux_subprocess.py` (has_session / new_session /
+  send_text / kill_session / list_sessions / set_status).
+  Integration-Tests skippen wenn `tmux` fehlt.
+- ⏭ **C4.1d** — *nächster Schritt morgen*:
+  - `application/session_service.py` mit **`ensure_started(project)`** als
+    Minimal-Use-Case: mode aus projects-Tabelle, session row aus
+    `claude_sessions` (für `--resume`), `tmux new-session` +
+    `send_text("safe-claude ...")`, transcript_path persistieren sobald
+    Claude das Transcript-File erzeugt.
+  - `CommandHandler._handle_set_active` erweitern: `/p <name>` ruft
+    `session_service.ensure_started(name)` wenn noch keine Session
+    läuft. Status-Bar wird nach `modes.status_bar_color` + `mode_badge`
+    gesetzt.
+  - `main.py`-Wiring: `SubprocessTmuxController` +
+    `SqliteClaudeSessionRepository` + `SessionService` konstruieren.
+  - **Tests**:
+    - Unit: `SessionService.ensure_started` mit Fake-TmuxController +
+      In-Memory-Repo. Fälle: no-session-yet, session-running-already,
+      session-tot-neu-starten, mode aus projects lesen.
+    - Integration: End-to-end `/p <name>` via `/webhook` → tmux-Session
+      existiert → `claude_sessions`-Row befüllt. Skipped wenn `tmux`
+      oder `claude` fehlen. `safe-claude` wird mit injectable Binary
+      überschrieben; Default-Stub schreibt ein Transcript-JSONL und
+      exitiert, damit keine echte Claude-Subscription benötigt wird.
+
+**Tests Stand**: 752/752 passing (+ 3 skipped wegen fehlendem tmux),
+mypy --strict clean, ruff clean. Commit-History:
+
+```
+f4fb514 feat(phase-4): C4.1c TmuxController port + subprocess adapter
+ff5ab93 feat(phase-4): C4.1b claude-session repository
+9a09f58 feat(phase-4): C4.1a modes + sessions domain (pure)
+d9e34be docs(phase-4): phase 4 rules — Mode-System + Claude-Launch
+```
+
+### System-Prerequisites für C4.1d-Smoke
+
+- `tmux ≥ 3.4` via `brew install tmux` — User hat das gerade erledigt.
+  Zum Bestätigen am Start der nächsten Session: `which tmux && tmux -V`.
+- `claude` CLI ist schon auf `~/.local/bin/claude` (verifiziert).
+- Headless-Claude-Stub (`tests/fixtures/headless_claude.py`) muss ich
+  in C4.1d bauen — kleines Python-Script, das stdin liest und ein
+  plausibles Transcript-JSONL in
+  `~/.claude/projects/<encoded>/sessions/<uuid>.jsonl` schreibt.
+
+### Wie wir morgen wieder einsteigen
+
+1. Diese Datei lesen (`.claude/rules/current-phase.md`).
+2. `.claude/rules/phase-4.md` für den Gesamt-Phase-Plan.
+3. `git log --oneline -6` zeigt den Commit-Stand.
+4. `tmux -V` ausführen — wenn grün, sollten die Integration-Tests in
+   `tests/integration/test_tmux_subprocess_real.py` jetzt nicht mehr
+   skippen, sondern grün durchlaufen (`pytest
+   tests/integration/test_tmux_subprocess_real.py -v`).
+5. Mit C4.1d anfangen — SessionService bauen.
 
 ## Phase 3 abgeschlossen ✅
 
