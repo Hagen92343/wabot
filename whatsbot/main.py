@@ -17,9 +17,12 @@ from fastapi.responses import PlainTextResponse
 
 import whatsbot
 from whatsbot.adapters.keychain_provider import KeychainProvider
+from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
 from whatsbot.config import Environment, Settings, assert_secrets_present
-from whatsbot.http.middleware import CorrelationIdMiddleware
+from whatsbot.http.meta_webhook import build_router as build_webhook_router
+from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddleware
 from whatsbot.logging_setup import configure_logging, get_logger
+from whatsbot.ports.message_sender import MessageSender
 from whatsbot.ports.secrets_provider import SecretsProvider
 
 _started_at_monotonic: Final[float] = time.monotonic()
@@ -28,6 +31,7 @@ _started_at_monotonic: Final[float] = time.monotonic()
 def create_app(
     settings: Settings | None = None,
     secrets_provider: SecretsProvider | None = None,
+    message_sender: MessageSender | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -38,26 +42,48 @@ def create_app(
     )
     log = get_logger("whatsbot.startup")
 
+    # Secrets gate (skipped entirely in test env so unit tests don't need a
+    # mocked Keychain unless they explicitly inject one).
     if settings.env is not Environment.TEST:
-        provider: SecretsProvider = (
-            secrets_provider if secrets_provider is not None else KeychainProvider()
-        )
-        missing = assert_secrets_present(provider, settings)
+        secrets_provider = secrets_provider if secrets_provider is not None else KeychainProvider()
+        missing = assert_secrets_present(secrets_provider, settings)
         if missing:
-            # In dev: the assertion does not raise — we only warn so the user
-            # can fire up the server before running ``make setup-secrets``.
             log.warning(
                 "secrets_missing_dev_mode",
                 env=settings.env.value,
                 missing=missing,
             )
 
+    # In test env we still need *some* secrets provider to build the webhook
+    # router — fall back to an empty stub.
+    secrets_for_router: SecretsProvider
+    if secrets_provider is not None:
+        secrets_for_router = secrets_provider
+    else:
+        secrets_for_router = _EmptySecretsProvider()
+
+    sender: MessageSender = message_sender if message_sender is not None else LoggingMessageSender()
+
     app = FastAPI(
         title="whatsbot",
         version=whatsbot.__version__,
         description="Persoenlicher WhatsApp-Bot zur Fernsteuerung von Claude Code (single user).",
     )
+    # Constant-time padding for /webhook only — avoids slowing /health probes.
+    # Spec §5: rejected webhook requests must take the same time as accepted
+    # ones so an attacker can't enumerate the sender whitelist via timing.
+    app.add_middleware(ConstantTimeMiddleware, min_duration_ms=200, paths=("/webhook",))
     app.add_middleware(CorrelationIdMiddleware)
+
+    app.include_router(
+        build_webhook_router(
+            settings=settings,
+            secrets=secrets_for_router,
+            sender=sender,
+            started_at_monotonic=_started_at_monotonic,
+            version=whatsbot.__version__,
+        )
+    )
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, object]:
@@ -80,3 +106,24 @@ def create_app(
         version=whatsbot.__version__,
     )
     return app
+
+
+class _EmptySecretsProvider:
+    """Fallback for the test env when no provider is injected.
+
+    Returns ``SecretNotFoundError`` for every key, which the webhook router
+    treats as "no whitelist, no app secret, no verify token" — exactly what
+    we want for unit tests that exercise routing logic without supplying
+    Keychain content.
+    """
+
+    def get(self, key: str) -> str:
+        from whatsbot.ports.secrets_provider import SecretNotFoundError
+
+        raise SecretNotFoundError(f"empty provider has no {key!r}")
+
+    def set(self, key: str, value: str) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def rotate(self, key: str, new_value: str) -> None:  # pragma: no cover
+        raise NotImplementedError

@@ -1,0 +1,25 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "WHATSAPP_BUSINESS_ACCOUNT_ID",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "messages": [
+              {
+                "from": "+499999999999",
+                "id": "wamid.STRANGER_FIXTURE_001",
+                "timestamp": "1745318404",
+                "text": { "body": "/ping" },
+                "type": "text"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

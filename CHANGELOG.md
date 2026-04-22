@@ -7,6 +7,59 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 1 — Fundament + Echo-Bot (in progress)
 
+#### C1.5 — Webhook + Echo (Signatur, Whitelist, Command-Router) ✅
+- `whatsbot/domain/whitelist.py`: pure Parser für `allowed-senders` aus Spec
+  §4 (kommasepariert, dedupe via `frozenset`, fail-closed bei leerer Liste).
+- `whatsbot/domain/commands.py`: pures Routing für `/ping`, `/status`,
+  `/help` mit `StatusSnapshot`-Dataclass für die nicht-pure Inputs (Version,
+  Uptime, DB-OK, Env). Unbekannte Commands liefern friendly hint, raisen
+  nicht — Phase 4 ersetzt diesen Branch durch "an aktive Claude-Session
+  weiterleiten".
+- `whatsbot/http/meta_webhook.py`:
+  - `verify_signature()` — HMAC-SHA256 vs raw Body, `compare_digest`,
+    fail-closed bei missing/malformed Header.
+  - `check_subscribe_challenge()` — Meta-Subscribe-Handshake; gibt
+    `hub.challenge` nur zurück wenn `hub.mode==subscribe` und
+    `hub.verify_token` matched (constant-time compare).
+  - `iter_text_messages()` — defensive Extraktion von `entry[].changes[]
+    .value.messages[]` mit `type==text`; skipt malformed/non-text/missing
+    silent statt zu raisen (Meta wiederholt eh).
+  - `build_router(...)` — `APIRouter`-Factory mit `GET /webhook` (challenge)
+    und `POST /webhook` (signature → whitelist → routing → sender).
+    Sig-Check wird im non-prod env mit fehlendem app-secret übersprungen
+    (für `make run-dev` ohne `make setup-secrets`).
+- `whatsbot/ports/message_sender.py`: `MessageSender`-Protocol (send_text).
+- `whatsbot/adapters/whatsapp_sender.py`:
+  - `LoggingMessageSender` — schreibt struktured Log statt zu senden,
+    Phase-1 Default und Test-Adapter.
+  - `WhatsAppCloudSender` — Skelett, raised `NotImplementedError`. Echte
+    httpx-/tenacity-Implementierung in C2.x sobald Projekte antworten.
+- `whatsbot/main.py`:
+  - Akzeptiert `message_sender`-DI-Param (Default `LoggingMessageSender`).
+  - Wired `build_webhook_router` ein, plus `ConstantTimeMiddleware(
+    paths=("/webhook",), min_duration_ms=200)` gegen Timing-Enumeration
+    der Sender-Whitelist (Spec §5).
+  - Test-Env: `_EmptySecretsProvider` Fallback wenn kein Provider
+    injiziert wird, sodass Unit-Tests die Webhook-Routes ohne Mock-Keychain
+    bauen können.
+- `tests/fixtures/meta_*.json`: 6 echte Meta-Payloads (ping, status, help,
+  unknown_command, unknown_sender, non_text/image).
+- `tests/send_fixture.sh`: schickt Fixture an `:8000/webhook` mit
+  HMAC-SHA256-Signatur (Secret aus Keychain falls vorhanden, sonst Dummy).
+- Tests: `test_whitelist.py` (9), `test_commands.py` (8),
+  `test_meta_webhook.py` (15 — Signatur, Challenge, iter_text_messages),
+  `test_webhook_routing.py` (17 — End-to-End mit StubSecrets +
+  RecordingSender, alle silent-drop-Pfade, Constant-Time-Padding).
+  **128 Tests grün, Coverage 96.17%** (Ziel ≥80%).
+- **Live-Smoke verifiziert**:
+  - dev-bot via uvicorn → `tests/send_fixture.sh meta_ping` → 200 OK + ULID
+  - JSON-Log zeigt: `signature_check_skipped_dev_mode` →
+    `sender_not_allowed` (fail-closed, weil `allowed-senders` Secret fehlt)
+  - `meta_unknown_sender` ebenfalls silent-drop mit `sender_not_allowed`
+  - **Happy-Path** (gültige Signatur + gültiger Sender → `command_routed` +
+    `outbound_message_dev`) ist via Integration-Tests mit `StubSecrets`
+    + `RecordingSender` voll abgedeckt.
+
 #### C1.4 — LaunchAgent + Backup-Agent + Repo-Migration ✅
 - `launchd/com.DOMAIN.whatsbot.plist.template`: Bot-Agent. `KeepAlive`
   mit `SuccessfulExit=False` (restart on crash, nicht auf graceful exit;

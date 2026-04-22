@@ -1,0 +1,30 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "WHATSAPP_BUSINESS_ACCOUNT_ID",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "messages": [
+              {
+                "from": "+491701234567",
+                "id": "wamid.IMAGE_FIXTURE_001",
+                "timestamp": "1745318405",
+                "type": "image",
+                "image": {
+                  "id": "MEDIA_ID",
+                  "mime_type": "image/jpeg",
+                  "sha256": "deadbeef",
+                  "caption": "/ignored"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
