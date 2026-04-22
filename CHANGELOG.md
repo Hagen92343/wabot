@@ -7,6 +7,44 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 1 — Fundament + Echo-Bot (in progress)
 
+#### C1.4 — LaunchAgent + Backup-Agent + Repo-Migration ✅
+- `launchd/com.DOMAIN.whatsbot.plist.template`: Bot-Agent. `KeepAlive`
+  mit `SuccessfulExit=False` (restart on crash, nicht auf graceful exit;
+  wichtig für `/panic`). `RunAtLoad=true`, `ProcessType=Background`.
+  `EnvironmentVariables`: `WHATSBOT_ENV`, `SSH_AUTH_SOCK` (für Phase 2 git
+  clone gegen private repos), `PATH`, `HOME`. `ProgramArguments` startet
+  uvicorn `--factory whatsbot.main:create_app`.
+- `launchd/com.DOMAIN.whatsbot.backup.plist.template`: täglich 03:00 via
+  `StartCalendarInterval` (Hour=3 Minute=0). `RunAtLoad=false`. Ruft
+  `bin/backup-db.sh`.
+- `bin/backup-db.sh`: **Stub** — gibt strukturierte JSON-Zeile aus.
+  Echtes `sqlite3 .backup` + 30-Tage-Retention kommt in C1.7.
+- `bin/render-launchd.sh`: deploy/undeploy via `launchctl bootstrap`/
+  `bootout`, idempotent (bootout vor bootstrap), `plutil -lint` vor jedem
+  load. Refused, falls Placeholders nicht ersetzt sind.
+- `Makefile`: `deploy-launchd` und `undeploy-launchd` mit `DOMAIN=`/
+  `ENV=`/`PORT=` Variablen. Default `ENV=prod`, `PORT=8000`,
+  `REPO_DIR=$(abspath .)`.
+- Tests: `tests/unit/test_launchd_template.py` — 13 Plist-Tests
+  (Label, KeepAlive, RunAtLoad, ProgramArguments, EnvironmentVariables,
+  ProcessType, StartCalendarInterval). **79 Tests grün, Coverage 95.97%**.
+- **Repo-Migration nach `~/whatsbot/`** (Spec §4 Default): macOS TCC
+  schützt `~/Desktop`, `~/Documents`, `~/Downloads` vor
+  LaunchAgent-Zugriff (Repo war anfangs unter
+  `~/Desktop/projects/wabot/` — der vom LaunchAgent gespawnte uvicorn
+  bekam `PermissionError` beim Lesen von `venv/pyvenv.cfg`). Nach `mv`
+  läuft alles. Symlink `~/Desktop/projects/wabot → ~/whatsbot` erhalten
+  als Convenience für die User-Convention "alle Projekte unter
+  ~/Desktop/projects/".
+- **Live-verifiziert**: `make deploy-launchd ENV=dev DOMAIN=local PORT=8000`
+  → `launchctl list` zeigt Bot mit echtem PID + Backup-Agent scheduled
+  → `curl /health` → 200 JSON inkl. `X-Correlation-Id` ULID
+  → `launchctl print` `state=running, active count=1`
+  → `app.jsonl` enthält frische `startup_complete`-Events
+  → `launchd-stderr.log` bleibt leer (sauberer Run)
+  → `make undeploy-launchd DOMAIN=local` → keine Agents mehr,
+    Port 8000 frei, Plists entfernt.
+
 #### C1.3 — Logging + Config + Health-Endpoint ✅
 - `whatsbot/logging_setup.py`: structlog mit JSONRenderer, contextvars merge
   (für `msg_id/session_id/project/mode`), TimeStamper (ISO UTC, key `ts`),

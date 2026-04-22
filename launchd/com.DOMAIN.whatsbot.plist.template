@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.__DOMAIN__.whatsbot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__UVICORN__</string>
+        <string>whatsbot.main:create_app</string>
+        <string>--factory</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>__WHATSBOT_PORT__</string>
+        <string>--log-level</string>
+        <string>warning</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_DIR__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>WHATSBOT_ENV</key>
+        <string>__WHATSBOT_ENV__</string>
+        <key>SSH_AUTH_SOCK</key>
+        <string>__SSH_AUTH_SOCK__</string>
+        <key>PATH</key>
+        <string>__PATH__</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/launchd-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/launchd-stderr.log</string>
+</dict>
+</plist>

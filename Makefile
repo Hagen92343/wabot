@@ -17,6 +17,10 @@ RUFF        := $(VENV)/bin/ruff
 UVICORN     := $(VENV)/bin/uvicorn
 
 DOMAIN      ?= local                       # used by deploy-launchd
+ENV         ?= prod                        # WHATSBOT_ENV passed into the LaunchAgent
+PORT        ?= 8000
+REPO_DIR    := $(abspath .)
+LAUNCH_DIR  := $(HOME)/Library/LaunchAgents
 LOG_DIR     := $(HOME)/Library/Logs/whatsbot
 APP_SUPPORT := $(HOME)/Library/Application\ Support/whatsbot
 DB_PATH     := $(APP_SUPPORT)/state.db
@@ -86,13 +90,11 @@ typecheck: ## mypy --strict
 setup-secrets: ## Interaktiv die 7 Keychain-Secrets setzen
 	bash bin/setup-secrets.sh
 
-deploy-launchd: ## LaunchAgent + Backup-Agent registrieren (kommt in C1.4)
-	@echo "TODO Phase 1 C1.4: launchd templates + launchctl load"
-	@exit 1
+deploy-launchd: ## LaunchAgents (Bot+Backup) rendern und bei launchd registrieren. Vars: DOMAIN= ENV= PORT=
+	bash bin/render-launchd.sh deploy "$(DOMAIN)" "$(ENV)" "$(PORT)" "$(REPO_DIR)" "$(LAUNCH_DIR)" "$$SSH_AUTH_SOCK"
 
-undeploy-launchd: ## LaunchAgent + Backup-Agent abmelden
-	@echo "TODO Phase 1 C1.4: launchctl unload"
-	@exit 1
+undeploy-launchd: ## LaunchAgents (Bot+Backup) abmelden + Plist-Files entfernen. Vars: DOMAIN=
+	bash bin/render-launchd.sh undeploy "$(DOMAIN)" "$(LAUNCH_DIR)"
 
 reset-db: ## State-DB neu anlegen mit frischem Schema (DESTRUCTIVE — nur Dev)
 	@echo "⚠️  This deletes $(DB_PATH). Press Ctrl+C to abort, Enter to continue."
