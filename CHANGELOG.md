@@ -5,7 +5,213 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
-### Phase 3 — Security-Core (in progress)
+### Phase 3 — Security-Core ✅ (complete)
+
+Alle 6 Checkpoints grün, Phase 3 komplett gebaut und verifiziert.
+
+- ✅ C3.1 — Hook-Script + Shared-Secret-IPC-Endpoint
+- ✅ C3.2 — Deny-Patterns + PIN-Rückfrage (End-to-End + 17 Fixtures)
+- ✅ C3.3 — Redaction-Pipeline 4 Stages + globaler Sender-Decorator
+- ✅ C3.4 — Input-Sanitization + Audit-Log
+- ✅ C3.5 — Output-Size-Warning + `/send` / `/discard` / `/save`
+- ✅ C3.6 — Fail-closed Hook-Integration-Smoke
+
+**Tests**: 689/689 passing, mypy --strict clean, ruff clean.
+**Offene Schuld**: Write-Hook hat noch den Stub-Pfad (`classify_write` = allow).
+Path-Rules-Policy (Spec §12 Layer 3) wird in Phase 4 oder als C3.7-Nachzug
+gebaut — C3-Checkpoints sind sonst alle geliefert.
+
+#### C3.6 — Fail-closed Hook-Integration-Smoke ✅
+
+Schließt die Fail-Closed-Matrix für die Pre-Tool-Hook. Die bereits
+vorhandenen Tests (unreachable, wrong secret, malformed stdin,
+unknown tool) werden ergänzt um explizite Boundary-Smokes für die
+server-seitigen Fehlerpfade.
+
+- **`tests/integration/test_hook_fail_closed.py`** — pro Szenario
+  eine eigene FastAPI-App auf einem Ephemeral-Port, `hooks/pre_tool.py`
+  per Subprocess gefeuert, Exit-Code + Stderr asserted:
+  - 500er mit JSON-Body der nicht dem Contract entspricht → Exit 2.
+  - Response mit `text/plain`-Body → Exit 2 (malformed JSON).
+  - Valid-JSON-aber-top-level-String → Exit 2 (non-object).
+  - `hookSpecificOutput`-Block fehlt → Exit 2.
+  - Unbekannter `permissionDecision`-Wert → Exit 2.
+  - Endpoint schläft länger als `READ_TIMEOUT` → Exit 2 (~10s Laufzeit).
+- 689/689 total, mypy + ruff clean.
+
+#### C3.5 — Output-Size-Warning (>10KB) ✅
+
+Spec §10 10KB-Schwelle + `/send` / `/discard` / `/save`-Dialog,
+komplett integriert in den Outbound-Pfad. In drei atomaren Commits
+(a: Domain, b: Port+Adapter, c: Service+Wiring).
+
+- **`whatsbot/domain/output_guard.py`** — pure: `THRESHOLD_BYTES =
+  10*1024` (UTF-8-Bytes, nicht Chars — Umlaute zählen richtig),
+  `is_oversized`, `format_warning` (exakter Spec-§10-Dialog mit
+  `⚠️ Claude will ~X KB senden ...`), `chunk_for_whatsapp` (3800-Char-
+  Chunks mit `(i/n)`-Präfix für n>1, kein Präfix für Single-Chunk).
+- **`whatsbot/domain/pending_outputs.py`** — `PendingOutput`-Dataclass
+  gemäß Spec-§19-Schema, 24h-Default-Deadline (länger als der
+  5-min-Hook-Fenster, weil User ggf. überlegen will).
+- **`whatsbot/ports/pending_output_repository.py`** +
+  **`whatsbot/adapters/sqlite_pending_output_repository.py`** — CRUD +
+  `latest_open()` (LIFO: `ORDER BY created_at DESC`, Single-User-
+  Szenario) + `delete_expired()`-Sweeper.
+- **`whatsbot/application/output_service.py`** — Orchestrator:
+  - `deliver(to, body, project_name)`: ≤10KB → direct-send; sonst
+    Body nach `<data-dir>/outputs/<msg_id>.md`, Pending-Row, Warnung.
+    FS-Fehler → Log + direct-send (lieber spill als drop).
+  - `resolve_send(to)` → Body lesen, chunken, Chunks senden,
+    Row+Datei löschen. `ResolveOutcome(kind="sent", chunks_sent=n)`.
+  - `resolve_discard(to)` → Row + Datei weg. `kind="discarded"`.
+  - `resolve_save(to)` → nur Row weg, Datei bleibt. `kind="saved"`.
+  - `none` + `missing` für no-pending / weg-von-Platte-Edge-Cases.
+- **`whatsbot/http/meta_webhook.py`** fängt `/send` · `/discard` ·
+  `/save` *vor* dem Command-Router ab (gleiches Muster wie der
+  PIN-Resolver). Jede sonstige Reply läuft jetzt durch
+  `output_service.deliver` — zukünftige >10KB-Antworten triggern
+  automatisch den Dialog.
+- Tests (38 neu, 683 total):
+  - `test_output_guard` (15) — Threshold-Edge-Cases, UTF-8-Byte-
+    Counting, Chunker-Nummerierung + Content-Preservation.
+  - `test_sqlite_pending_output_repository` (12) — CRUD, LIFO-
+    Ordering, Duplicate-ID-Rejection, Expiry-Sweep.
+  - `test_output_service` (11) — alle Pfade inkl. FS-Write-Failure-
+    Fallback + Missing-File-nach-`/send`.
+  - `test_output_dialog` (6) — echter TestClient über
+    `/webhook`, 3-Chunk-Send, Discard, Save, no-pending-Pfade.
+
+#### C3.4 — Input-Sanitization + Audit-Log ✅
+
+Spec-§9-Telegraphen-Detection + Normal-Mode-Wrap. Phase 4 wird die
+wrapped Variante an Claude weiterreichen; heute nur Detection +
+Audit-Log, damit eine Forensik-Spur entsteht.
+
+- **`whatsbot/domain/injection.py`** — pure:
+  - `detect_triggers(text)`: word-boundary, case-insensitive Regex-
+    Scan auf die 5 Spec-§9-Phrasen
+    (`ignore previous`, `disregard`, `system:`, `you are now`,
+    `your new task`). Gibt Tupel der getriggerten Labels zurück.
+  - `sanitize(text, *, mode)`: `SanitizeResult`. Trigger-Liste immer
+    populiert. Wrap nur in Normal-Mode — Strict blockt eh über
+    `dontAsk`, YOLO ist explizites "I accept the risk".
+- **`whatsbot/http/meta_webhook.py`** — jeder whitelisted Inbound
+  läuft durch `detect_triggers`. Bei Hits feuert ein strukturiertes
+  `injection_suspected`-WARN-Event mit `triggers`, `text_len` +
+  bereits gebundenen Correlation-Fields (`msg_id`, `wa_msg_id`,
+  `sender`). Command-Dispatch läuft danach weiter — wir auditten,
+  aber droppen nichts still.
+- Tests (33 neu, 639 total):
+  - `test_injection` (30) — jeder Trigger × jeder Mode, Multi-Hit-
+    Reihenfolge, False-Positive-Kontrollen
+    (`disregarded by the compiler`, `system is online`, etc.).
+  - `test_injection_audit` (3) — End-to-End-`/webhook`-POST, JSON-
+    Log-Parsing aus stderr (structlog schreibt direkt, caplog sieht
+    es nicht), Happy-Path und Clean-Path.
+
+#### C3.3 — Redaction-Pipeline (4 Stages) ✅
+
+Spec §10 Redaction komplett durch. In zwei Commits (a: Domain + Tests,
+b: Decorator + global wiring).
+
+- **`whatsbot/domain/redaction.py`** — 4-stage pure Pipeline:
+  - **Stage 1** known keys: AWS (`AKIA`), GitHub
+    (`ghp_`/`ghs_`/`github_pat_`), OpenAI (`sk-`/`sk-proj-`), Stripe
+    (`sk_live_`/`rk_live_`), JWT, Bearer.
+  - **Stage 2** struktureller Patterns: PEM-Blocks, SSH-Pubkeys,
+    DB-URLs mit Credentials, `KEY=VALUE` mit sensitiven Keys
+    (incl. JSON-Style `"password": "..."`).
+  - **Stage 3** Entropy: ≥40-Char-Tokens mit Shannon > 4.5 UND
+    mindestens einer Ziffer (letzterer Guard filtert camelCase-
+    False-Positives), URLs übersprungen.
+  - **Stage 4** Sensitive-Path-Line-Content (~/.ssh, ~/.aws, etc.):
+    lange Tokens auf Zeilen, die einen sensitiven Pfad erwähnen,
+    als `<REDACTED:path-content>`.
+  - Labels `<REDACTED:aws-key>` / `<REDACTED:env:password>` etc. —
+    Debugging bleibt möglich ohne Secret-Leak.
+  - CLI: `python -m whatsbot.domain.redaction` (stdin-Smoke).
+- **`whatsbot/adapters/redacting_sender.py`** — Decorator um
+  `MessageSender`, loggt Hit-Labels bei Anwendung. Wrappt den
+  injizierten Sender in `main.create_app` — jeder Outbound-Pfad
+  (Command-Reply, Hook-Confirmation-Prompt, PIN-Ack, zukünftige
+  kill/stop-Notifications) bekommt automatisch Redaction.
+- Tests (44 neu, 606 total):
+  - `test_redaction` (37) — jede Stage, jeder Secret-Typ (≥10),
+    False-Positive-Controls auf normaler Prosa, URLs, Hex-Hashes,
+    camelCase-Identifier, Pipeline-Idempotenz auf bereits-
+    redacted Output.
+  - `test_redacting_sender` (5) — Passthrough, AWS-Key gescrubbt,
+    env:password gescrubbt, Cross-Call-Isolation.
+  - `test_redaction_wired` (2) — End-to-End via `/webhook`-POST
+    mit `/new AKIA...` (Command-Handler echot den invaliden Namen
+    → `<REDACTED:aws-key>` landet beim RecordingSender).
+
+#### C3.2 — Deny-Patterns + PIN-Rückfrage (End-to-End) ✅
+
+Die Security-Policy-Keule. In vier atomaren Commits
+(a: Deny-Patterns+Matrix, b: Pending-Confirmation-Repo, c: Async-
+Coordinator+Wiring, Smoke: 17 Fixtures + E2E).
+
+- **`whatsbot/domain/deny_patterns.py`** — die 17 Patterns aus
+  Spec §12 als Konstante + `match_bash_command(cmd) -> DenyMatch | None`.
+  Matcher normalisiert Whitespace (mehrfach → einfach) und einfache
+  Quotes (`rm -rf "/"` → `rm -rf /`) vor dem `fnmatch.fnmatchcase`-
+  Vergleich. `bash -c '...'`-Wrappings und Command-Chaining via
+  `&&` sind *nicht* abgedeckt — defense-in-depth-Layer, nicht
+  Shell-Parser. 71 Unit-Tests.
+- **`whatsbot/domain/hook_decisions.evaluate_bash(command, *, mode,
+  allow_patterns)`** — Spec-§12-Decision-Matrix: Deny gewinnt
+  immer (auch YOLO), Allow-Rule short-circuits AskUser, Mode-
+  Fall-Through ist Normal→AskUser, Strict→Deny, YOLO→Allow. 13
+  neue Tests für die Matrix, darunter "Allow-Rule schlägt Deny
+  nicht" als explizite Invariante.
+- **`whatsbot/domain/pending_confirmations.py`** +
+  **`whatsbot/ports/pending_confirmation_repository.py`** +
+  **`whatsbot/adapters/sqlite_pending_confirmation_repository.py`**
+  — 5-min-Fenster, `ConfirmationKind` enum
+  (`hook_bash` / `hook_write`), opaque JSON `payload`. 15 Unit-Tests
+  gegen `:memory:`-SQLite.
+- **`whatsbot/application/confirmation_coordinator.py`** —
+  In-memory `asyncio.Future`-Registry + DB-Persistenz-Bridge.
+  `ask_bash` öffnet eine Row, feuert ein WhatsApp-Prompt
+  (best-effort), awaited die Future mit Timeout, collapsed zu
+  Allow/Deny. `try_resolve(text, *, pin)` ist sync (kein await nötig)
+  und matcht FIFO auf die älteste offene Row — PIN ist
+  `hmac.compare_digest`, leerer PIN matcht nie (Fail-Safe).
+- **`whatsbot/application/hook_service.py`** neu geschrieben:
+  - `classify_bash` ist jetzt async, wrapt `evaluate_bash` + delegiert
+    AskUser an den Coordinator.
+  - Optional-Deps-Pattern: ohne Coordinator fällt der Service auf
+    den C3.1-Stub zurück (allow-by-default), damit C3.1-Integration-
+    Tests unverändert durchlaufen.
+  - `_project_context(project)` failt-closed bei unbekanntem
+    Projekt auf `Mode.NORMAL` + leere Allow-Liste.
+- **`whatsbot/http/meta_webhook.py`** fängt PIN / "nein" *vor* dem
+  Command-Router ab (sonst würde die PIN als unknown command
+  interpretiert). `/webhook`-Router bekommt optionale Coordinator-
+  Dep; bei Hit → Resolve + kurze Ack-Message.
+- **`whatsbot/http/hook_endpoint.py`** wird async (`await
+  service.classify_bash(...)`). Service-Exception → **explizit 200
+  + deny** (Debugging-freundlicher als "keine Antwort").
+- **`whatsbot/main.py`**: Coordinator + Default-Recipient (erste
+  Nummer aus `allowed-senders`) global wired. `create_hook_app` kann
+  optional den bestehenden `main_app` übernehmen und dessen
+  Project-Repo + Allow-Rule-Repo + Coordinator wiederverwenden
+  (Phase-4-Path; Phase-3-Stand-alone-Tests bleiben simpel).
+- **`tests/fixtures/deny/*.json`** — 17 minimale JSON-Payloads, eine
+  pro Pattern. Kann per `cat | hooks/pre_tool.py` manuell reproduziert
+  werden.
+- **`tests/integration/test_deny_patterns_e2e.py`** — 20 E2E-Tests:
+  - Fixture-Integrity (17 Fixtures × 17 Patterns, keine Drift).
+  - Jede Fixture gegen einen full-wired TestClient in **YOLO-Mode**.
+    Deny muss auch dort feuern — das ist der Spec-§12-Fail-Closed-
+    Beweis.
+  - Negative Controls: `git status` in YOLO → `allow`; Quote-Tricks
+    (`rm   -rf    "/"`) überleben HTTP + JSON-Roundtrip.
+- Tests insgesamt: 562 → 562 total nach diesem Checkpoint (Numbering
+  aus C3-Zwischenschritten — Gesamt-Sprung wurde inkrementell
+  aufgebaut: 71 Deny-Pattern + 13 evaluate_bash + 15 Pending-
+  Confirmation + 11 Coordinator + 13 HookService-Rewrite + 20 E2E).
 
 #### C3.1 — Hook-Script + Shared-Secret-IPC ✅
 
