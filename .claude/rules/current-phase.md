@@ -1,50 +1,60 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 2 — Projekt-Management + Smart-Detection
-**Aktiver Checkpoint**: C2.3 (Smart-Detection für 9 Artefakt-Types)
-**Letzter abgeschlossener Checkpoint**: C2.2 (`/new git` + URL-Whitelist)
+**Aktiver Checkpoint**: C2.4 (`/allow batch approve` + `/allow batch review` + `/allow`/`/deny`/`/allowlist`)
+**Letzter abgeschlossener Checkpoint**: C2.3 (Smart-Detection für 9 Artefakt-Stacks)
 
-## Was C2.2 geliefert hat
+## Phase-2-Fortschritt: 3/8 Checkpoints
 
-- URL-Whitelist (3 Hosts × 3 Schemas) mit fail-closed gegen alles andere
-- `GitClone` Port + `SubprocessGitClone` Adapter (`git clone --depth 50
-  --quiet`)
-- Post-Clone Scaffolding: `.claudeignore`, `.whatsbot/config.json`,
-  `CLAUDE.md` (nur wenn upstream keines hat), `suggested-rules.json`
-- Smart-Detection-Skelett (`package.json` + `.git`)
-- `/new <name> git <url>` aktiv im CommandHandler
-- 59 neue Tests (260 total), Coverage 95.09%
-- Live-verifiziert mit `octocat/Hello-World` Clone
+- ✅ C2.1 — `/new <name>` empty + `/ls`
+- ✅ C2.2 — `/new <name> git <url>` + URL-Whitelist + Smart-Detection-Stub
+- ✅ C2.3 — Smart-Detection für alle 9 Artefakt-Stacks
+- ⏳ C2.4 — Allow-Rule-Management (folgt jetzt)
+- ⏳ C2.5 — `/allow` / `/deny` / `/allowlist` manuell
+- ⏳ C2.6 — URL-Whitelist Tests (eigentlich schon in C2.2 abgedeckt — evtl. zusammenfassen)
+- ⏳ C2.7 — `/rm <n>` mit PIN + Trash
+- ⏳ C2.8 — Tests grün
 
-## Was als Nächstes zu tun ist (C2.3)
+## Was als Nächstes zu tun ist (C2.4)
 
-C2.3 laut `phase-2.md` Smart-Detection-Tabelle: alle 9 Artefakt-Types.
-Aktuell sind 2 von 9 implementiert (`package.json`, `.git`). Hinzu:
+C2.4 laut `phase-2.md` "Allow-Rule-Management":
 
-| Datei | Rules |
-|-------|-------|
-| `yarn.lock` | `Bash(yarn *)`, `Bash(yarn install)`, `Bash(yarn test)` |
-| `pnpm-lock.yaml` | `Bash(pnpm *)`, `Bash(pnpm install)` |
-| `pyproject.toml` | `Bash(uv *)`, `Bash(pytest)`, `Bash(python -m *)`, `Bash(ruff *)`, `Bash(mypy *)` |
-| `requirements.txt` | `Bash(pip install -r requirements.txt)`, `Bash(python -m *)`, `Bash(pytest)` |
-| `Cargo.toml` | `Bash(cargo build)`, `Bash(cargo test)`, `Bash(cargo check)`, `Bash(cargo clippy)`, `Bash(cargo fmt)` |
-| `go.mod` | `Bash(go build)`, `Bash(go test ./*)`, `Bash(go run *)`, `Bash(go mod tidy)` |
-| `Makefile` | `Bash(make *)` |
-| `docker-compose.yml`/`.yaml` | `Bash(docker compose ps)`, `Bash(docker compose logs *)`, `Bash(docker compose up -d)`, `Bash(docker compose down)` |
+1. `domain/allow_rules.py` — pure Logic
+   - `parse_pattern("Bash(npm test)") → AllowRule(tool="Bash", pattern="npm test")`
+   - Validierung: Tool aus erlaubter Liste (Bash, Write, Edit, Read, Grep, Glob),
+     pattern non-empty, kein nested ()
+2. `ports/allow_rule_repository.py` + sqlite-adapter
+   - Persistiert in `allow_rules`-Tabelle (Spec §19)
+   - source: 'default', 'smart_detection', 'manual'
+3. `application/allow_service.py`
+   - `add_rule(project, tool, pattern, source)` — DB + .claude/settings.json sync
+   - `remove_rule(...)` — analog
+   - `list_rules(project)` — gruppiert nach source
+   - `apply_suggested(project)` — liest .whatsbot/suggested-rules.json,
+     ruft add_rule für jede, löscht die Vorschlags-Datei
+4. `command_handler.py`:
+   - `/allow batch approve` (per active project)
+   - `/allow batch review` — listet Vorschläge mit numbers
+   - `/allowlist` — zeigt aktuelle Liste
+5. Voraussetzung: Active-Project-Tracking (`/p <name>`) — ein leichter
+   Vorgriff aus C2.5, weil Allow-Rules per Projekt sind. Lege ich
+   minimal in C2.4 mit an: `app_state` Row `active_project`,
+   `/p <n>` und `/p` (zeigt aktives) Commands.
 
-Verifikation (C2.3 done):
-- Tests für alle 9 Artefakte (auch Combo-Cases, z.B. Cargo + Makefile)
-- Manuelle Smoke gegen 5 echte Repos pro Stack (oder simulierte Layouts)
-- `/allow batch approve` schreibt die Rules in `.claude/settings.json`
-  (kommt eigentlich erst in C2.4 — aber der Detection-Output wird hier
-  verifiziert)
+Verifikation (C2.4 done):
+- `/new alpha git https://github.com/octocat/Hello-World` → Vorschläge
+- `/p alpha` → setzt aktiv
+- `/allow batch review` → zeigt 7 Vorschläge nummeriert
+- `/allow batch approve` → schreibt Rules, löscht suggested-rules.json
+- `~/projekte/alpha/.claude/settings.json` enthält permissions.allow Array
+- `/allowlist` → 7 Einträge gruppiert nach `smart_detection`
 
 ## Format-Konvention für Updates
 
 ```
 **Aktive Phase**: Phase 2 — Projekt-Management + Smart-Detection
-**Aktiver Checkpoint**: C2.4 (`/allow batch approve` + `/allow batch review`)
-**Letzter abgeschlossener Checkpoint**: C2.3 (Smart-Detection 9 Artefakte)
+**Aktiver Checkpoint**: C2.5 (`/allow`/`/deny`/`/allowlist` manuell)
+**Letzter abgeschlossener Checkpoint**: C2.4 (Allow-Rule-Management batch)
 ```
 
 ## Hinweis bei Session-Start

@@ -7,6 +7,31 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 2 — Projekt-Management + Smart-Detection (in progress)
 
+#### C2.3 — Smart-Detection für alle 9 Artefakt-Stacks ✅
+- `whatsbot/domain/smart_detection.py` erweitert von 2 auf alle
+  9 Artefakte aus Spec §6 / phase-2.md:
+  - `yarn.lock` → 3 yarn-Rules
+  - `pnpm-lock.yaml` → 2 pnpm-Rules
+  - `pyproject.toml` → 5 Python-Tooling-Rules (uv, pytest, python -m, ruff, mypy)
+  - `requirements.txt` → 3 pip-Rules
+  - `Cargo.toml` → 5 cargo-Rules (build/test/check/clippy/fmt)
+  - `go.mod` → 4 go-Rules
+  - `Makefile` → 1 make-Rule
+  - `docker-compose.yml` / `docker-compose.yaml` → 4 docker-compose-Rules
+- Detection-Reihenfolge ist stabil (file-Artefakte in
+  Deklarationsreihenfolge, dann docker-compose, dann `.git/` als letztes)
+  damit die WhatsApp-Listing-Ausgabe lesbar bleibt.
+- `_ARTEFACT_RULES`-Dict + `_rules_for()`-Helper ersetzen die
+  C2.2-tuple-per-artefact-Pattern; neue Stacks lassen sich künftig in
+  einer Zeile ergänzen.
+- Defensive Guards: jedes Datei-Artefakt MUSS eine Datei sein (kein
+  Verzeichnis mit dem gleichen Namen → kein Match), `.git` MUSS ein
+  Verzeichnis sein (Submodul-Pointer-Datei `gitdir: ../...` matcht NICHT).
+- Tests: 14 neue Tests in `test_smart_detection.py`. Coverage pro Stack
+  + Combo-Cases (Python+Make+Compose+git → 17 Rules), Listing-Order-Test,
+  Universal-Bash-Tool-Check, parametrisierter "muss Datei sein"-Guard.
+  **280 Tests grün, Coverage 95.17%**.
+
 #### C2.2 — `/new <name> git <url>` + URL-Whitelist + Smart-Detection-Stub ✅
 - `whatsbot/domain/git_url.py`: URL-Whitelist (Spec §13). Pure Validation,
   drei Schemas (https / git@ / ssh://), drei Hosts (github / gitlab /
