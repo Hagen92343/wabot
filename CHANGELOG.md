@@ -7,6 +7,67 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 2 — Projekt-Management + Smart-Detection (in progress)
 
+#### C2.4 / C2.5 — Allow-Rule-Management + `/p` Active-Project ✅
+*(C2.4 + C2.5 zusammen abgehandelt — die Manual-Rules-Commands aus C2.5 fielen
+beim Wiren des batch-Flows quasi mit ab.)*
+
+- **`whatsbot/domain/allow_rules.py`**: pure Pattern-Logik. `parse_pattern`
+  konsumiert `Tool(pattern)`, validiert gegen `ALLOWED_TOOLS = {Bash, Write,
+  Edit, Read, Grep, Glob}`, lehnt unbalancierte Klammern + leere Patterns ab.
+  `format_pattern` für Round-Trip + WhatsApp-Output. `AllowRuleSource`
+  StrEnum (default / smart_detection / manual) matcht den
+  Spec-§19-CHECK-Constraint.
+- **`whatsbot/ports/allow_rule_repository.py`** + **`adapters/sqlite_allow_rule_repository.py`**:
+  Idempotentes `add` (Duplikat → bestehende Row zurück), `remove` mit
+  Boolean-Indikator, `list_for_project` in Insertion-Reihenfolge.
+- **`whatsbot/ports/app_state_repository.py`** + **`adapters/sqlite_app_state_repository.py`**:
+  Kleines Key/Value gegen die `app_state`-Tabelle mit reservierten Keys
+  (`active_project`, `lockdown`, `version`, `last_heartbeat`). UPSERT via
+  `ON CONFLICT(key) DO UPDATE`.
+- **`whatsbot/application/settings_writer.py`**: schreibt das per-Projekt
+  `.claude/settings.json` atomar (tmp + `os.replace`), bewahrt andere Top-
+  Level-Keys (`hooks` etc.) und überschreibt nur `permissions.allow`.
+- **`whatsbot/application/active_project_service.py`**: 2 Methoden,
+  `get_active` heilt sich selbst wenn die persistierte Auswahl auf ein
+  gelöschtes Projekt zeigt; `set_active` validiert + checkt Existenz.
+- **`whatsbot/application/allow_service.py`**: orchestriert die drei
+  Storage-Layer (DB, settings.json, `.whatsbot/suggested-rules.json`).
+  Use-Cases: `add_manual`, `remove`, `list_rules`, `batch_review` (read-
+  only), `batch_approve` (idempotent: bereits vorhandene Rules werden
+  nicht doppelt geschrieben, klassifiziert in `added` vs. `already_present`,
+  am Ende ein `_sync_settings`-Call statt N Calls).
+- **`whatsbot/application/command_handler.py`** erweitert um:
+  - `/p` (zeigt aktives Projekt) und `/p <name>` (setzt aktiv)
+  - `/allowlist` (gruppiert nach Source: default / smart_detection / manual)
+  - `/allow <pattern>` (manual single-rule add)
+  - `/deny <pattern>` (manual single-rule remove)
+  - `/allow batch approve` (übernimmt suggested-rules.json komplett)
+  - `/allow batch review` (nummerierte Liste der offenen Vorschläge)
+  - `/ls` markiert das aktive Projekt jetzt mit `▶`.
+- **`whatsbot/main.py`**: `AllowService` + `ActiveProjectService` werden
+  beim Bot-Start gewired; CommandHandler bekommt sie via DI.
+- Tests (76 neu, 336 total): `test_allow_rules` (16), `test_sqlite_allow_rule_repository`
+  (10), `test_sqlite_app_state_repository` (6), erweiterte
+  `test_command_handler` (16 neue Tests für `/p`, `/allow`, `/deny`,
+  `/allowlist`, batch-Flows). **Coverage 93.77%**, mypy strict + ruff
+  format/lint clean.
+- **Live-Smoke verifiziert** (echter Clone von `octocat/Hello-World`):
+  ```
+  /p                       → "kein aktives Projekt"
+  /new hello git ...       → geklont, 7 .git-Vorschläge
+  /p hello                 → "▶ aktiv: hello"
+  /ls                      → "▶ 🟢 hello (git)"
+  /allow batch review      → 7 nummerierte Vorschläge
+  /allow batch approve     → "✅ 7 neue Rules" + Datei gelöscht
+  /allowlist               → 7 Einträge unter [smart_detection]
+  /allow Bash(make test)   → "✅ Rule hinzugefügt"
+  /allowlist               → 7 + 1 unter [smart_detection] / [manual]
+  /deny Bash(make test)    → "🗑 Rule entfernt"
+  ```
+  `~/projekte/hello/.claude/settings.json` enthält stets exakt die aktuelle
+  `permissions.allow`-Liste, `~/projekte/hello/.whatsbot/suggested-rules.json`
+  ist nach `batch approve` weg.
+
 #### C2.3 — Smart-Detection für alle 9 Artefakt-Stacks ✅
 - `whatsbot/domain/smart_detection.py` erweitert von 2 auf alle
   9 Artefakte aus Spec §6 / phase-2.md:

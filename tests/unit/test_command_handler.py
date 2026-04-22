@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 
 from whatsbot.adapters import sqlite_repo
+from whatsbot.adapters.sqlite_allow_rule_repository import SqliteAllowRuleRepository
+from whatsbot.adapters.sqlite_app_state_repository import SqliteAppStateRepository
 from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
+from whatsbot.application.active_project_service import ActiveProjectService
+from whatsbot.application.allow_service import AllowService
 from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.project_service import ProjectService
 from whatsbot.ports.git_clone import GitClone, GitCloneError
@@ -74,17 +78,38 @@ def git_clone() -> GitClone:
 
 
 @pytest.fixture
-def handler(conn: sqlite3.Connection, tmp_path: Path, git_clone: GitClone) -> CommandHandler:
-    projects_root = tmp_path / "projekte"
-    projects_root.mkdir()
+def projects_root(tmp_path: Path) -> Path:
+    root = tmp_path / "projekte"
+    root.mkdir()
+    return root
+
+
+@pytest.fixture
+def handler(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    git_clone: GitClone,
+) -> CommandHandler:
+    project_repo = SqliteProjectRepository(conn)
     project_service = ProjectService(
-        repository=SqliteProjectRepository(conn),
+        repository=project_repo,
         conn=conn,
         projects_root=projects_root,
         git_clone=git_clone,
     )
+    allow_service = AllowService(
+        rule_repo=SqliteAllowRuleRepository(conn),
+        project_repo=project_repo,
+        projects_root=projects_root,
+    )
+    active_project = ActiveProjectService(
+        app_state=SqliteAppStateRepository(conn),
+        projects=project_repo,
+    )
     return CommandHandler(
         project_service=project_service,
+        allow_service=allow_service,
+        active_project=active_project,
         version="0.1.0",
         started_at_monotonic=time.monotonic(),
         env="test",
@@ -181,20 +206,30 @@ def test_new_git_rejects_invalid_name(handler: CommandHandler) -> None:
     assert "⚠️" in result.reply
 
 
-def test_new_git_clone_failure_surfaces(conn: sqlite3.Connection, tmp_path: Path) -> None:
+def test_new_git_clone_failure_surfaces(conn: sqlite3.Connection, projects_root: Path) -> None:
     """When the GitClone adapter raises, the handler must surface the error
     instead of silently swallowing it."""
-    projects_root = tmp_path / "projekte"
-    projects_root.mkdir()
     failing = StubGitClone(should_fail=True, fail_message="repo not found")
+    project_repo = SqliteProjectRepository(conn)
     svc = ProjectService(
-        repository=SqliteProjectRepository(conn),
+        repository=project_repo,
         conn=conn,
         projects_root=projects_root,
         git_clone=failing,
     )
+    allow_service = AllowService(
+        rule_repo=SqliteAllowRuleRepository(conn),
+        project_repo=project_repo,
+        projects_root=projects_root,
+    )
+    active_project = ActiveProjectService(
+        app_state=SqliteAppStateRepository(conn),
+        projects=project_repo,
+    )
     h = CommandHandler(
         project_service=svc,
+        allow_service=allow_service,
+        active_project=active_project,
         version="0.1.0",
         started_at_monotonic=time.monotonic(),
         env="test",
@@ -203,6 +238,170 @@ def test_new_git_clone_failure_surfaces(conn: sqlite3.Connection, tmp_path: Path
     assert result.command == "/new git"
     assert "git clone fehlgeschlagen" in result.reply
     assert not (projects_root / "alpha").exists()
+
+
+# --- /p (active project) ---------------------------------------------------
+
+
+def test_p_shows_no_active_when_none_set(handler: CommandHandler) -> None:
+    result = handler.handle("/p")
+    assert result.command == "/p"
+    assert "kein aktives Projekt" in result.reply
+
+
+def test_p_sets_active_for_existing_project(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    result = handler.handle("/p alpha")
+    assert result.command == "/p"
+    assert "alpha" in result.reply
+    # Now /p without arg returns the active.
+    follow_up = handler.handle("/p")
+    assert "alpha" in follow_up.reply
+
+
+def test_p_rejects_unknown_project(handler: CommandHandler) -> None:
+    result = handler.handle("/p ghost")
+    assert "⚠️" in result.reply
+    assert "ghost" in result.reply
+
+
+def test_ls_marks_active_project(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/new beta")
+    handler.handle("/p alpha")
+    result = handler.handle("/ls")
+    # The format_listing helper prints "▶" next to the active project.
+    line_with_marker = next(line for line in result.reply.splitlines() if "▶" in line)
+    assert "alpha" in line_with_marker
+    assert "beta" not in line_with_marker
+
+
+# --- /allow + /deny + /allowlist ------------------------------------------
+
+
+def test_allow_requires_active_project(handler: CommandHandler) -> None:
+    result = handler.handle("/allow Bash(npm test)")
+    assert result.command == "/allow"
+    assert "kein aktives Projekt" in result.reply
+
+
+def test_allow_adds_manual_rule(handler: CommandHandler, projects_root: Path) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    result = handler.handle("/allow Bash(echo hi)")
+    assert result.command == "/allow"
+    assert "Bash(echo hi)" in result.reply
+
+    # settings.json must be in sync.
+    import json
+
+    settings = json.loads((projects_root / "alpha" / ".claude" / "settings.json").read_text())
+    assert "Bash(echo hi)" in settings["permissions"]["allow"]
+
+
+def test_allow_rejects_invalid_rule(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    result = handler.handle("/allow garbage")
+    assert "⚠️" in result.reply
+
+
+def test_deny_removes_manual_rule(handler: CommandHandler, projects_root: Path) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    handler.handle("/allow Bash(echo hi)")
+    result = handler.handle("/deny Bash(echo hi)")
+    assert result.command == "/deny"
+    assert "🗑" in result.reply
+
+    import json
+
+    settings = json.loads((projects_root / "alpha" / ".claude" / "settings.json").read_text())
+    assert settings["permissions"]["allow"] == []
+
+
+def test_deny_warns_when_rule_absent(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    result = handler.handle("/deny Bash(ghost)")
+    assert "⚠️" in result.reply
+
+
+def test_allowlist_empty(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    result = handler.handle("/allowlist")
+    assert "noch keine Allow-Rules" in result.reply
+
+
+def test_allowlist_groups_by_source(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    handler.handle("/allow Bash(npm test)")
+    handler.handle("/allow Bash(make build)")
+    result = handler.handle("/allowlist")
+    assert "[manual]" in result.reply
+    assert "Bash(npm test)" in result.reply
+    assert "Bash(make build)" in result.reply
+
+
+# --- /allow batch approve / review ----------------------------------------
+
+
+def test_batch_review_when_no_suggestions(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    result = handler.handle("/allow batch review")
+    assert "keine Vorschlaege" in result.reply
+
+
+def test_batch_approve_when_no_suggestions(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    result = handler.handle("/allow batch approve")
+    assert "⚠️" in result.reply
+    assert "Keine Vorschlaege" in result.reply
+
+
+def test_batch_review_lists_git_clone_suggestions(handler: CommandHandler) -> None:
+    """After /new git, the suggested-rules.json carries 12 patterns
+    (5 npm + 7 git) — review must list all of them."""
+    handler.handle("/new alpha git https://github.com/o/r")
+    handler.handle("/p alpha")
+    result = handler.handle("/allow batch review")
+    assert "Vorschlaege fuer 'alpha'" in result.reply
+    assert "12" in result.reply  # the count
+    assert "Bash(npm test)" in result.reply
+    assert "Bash(git status)" in result.reply
+
+
+def test_batch_approve_persists_and_clears(handler: CommandHandler, projects_root: Path) -> None:
+    handler.handle("/new alpha git https://github.com/o/r")
+    handler.handle("/p alpha")
+    approve = handler.handle("/allow batch approve")
+    assert "12 neue Rules" in approve.reply
+
+    # suggested-rules.json gone after approve.
+    assert not (projects_root / "alpha" / ".whatsbot" / "suggested-rules.json").exists()
+
+    # /allowlist now shows 12 entries under smart_detection.
+    listing = handler.handle("/allowlist").reply
+    assert "[smart_detection]" in listing
+    for needle in ("Bash(npm test)", "Bash(git status)", "Bash(git fetch *)"):
+        assert needle in listing
+
+
+def test_batch_approve_is_idempotent(handler: CommandHandler, projects_root: Path) -> None:
+    """Running approve twice must not double-write rules — but the second
+    call also has no suggestions, so it raises NoSuggestedRulesError."""
+    handler.handle("/new alpha git https://github.com/o/r")
+    handler.handle("/p alpha")
+    handler.handle("/allow batch approve")
+    second = handler.handle("/allow batch approve")
+    assert "⚠️" in second.reply
+    # Rules from the first approve are still there exactly once.
+    listing = handler.handle("/allowlist").reply
+    assert listing.count("Bash(npm test)") == 1
 
 
 # --- /ls -------------------------------------------------------------------

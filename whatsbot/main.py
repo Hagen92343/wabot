@@ -19,10 +19,18 @@ from fastapi.responses import PlainTextResponse
 
 import whatsbot
 from whatsbot.adapters.keychain_provider import KeychainProvider
+from whatsbot.adapters.sqlite_allow_rule_repository import (
+    SqliteAllowRuleRepository,
+)
+from whatsbot.adapters.sqlite_app_state_repository import (
+    SqliteAppStateRepository,
+)
 from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
 from whatsbot.adapters.sqlite_repo import open_state_db
 from whatsbot.adapters.subprocess_git_clone import SubprocessGitClone
 from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
+from whatsbot.application.active_project_service import ActiveProjectService
+from whatsbot.application.allow_service import AllowService
 from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.project_service import ProjectService
 from whatsbot.config import Environment, Settings, assert_secrets_present
@@ -85,15 +93,27 @@ def create_app(
 
     git_clone_adapter: GitClone = git_clone if git_clone is not None else SubprocessGitClone()
 
+    project_repo = SqliteProjectRepository(conn)
     project_service = ProjectService(
-        repository=SqliteProjectRepository(conn),
+        repository=project_repo,
         conn=conn,
         projects_root=projects_root,
         git_clone=git_clone_adapter,
     )
+    allow_service = AllowService(
+        rule_repo=SqliteAllowRuleRepository(conn),
+        project_repo=project_repo,
+        projects_root=projects_root,
+    )
+    active_project = ActiveProjectService(
+        app_state=SqliteAppStateRepository(conn),
+        projects=project_repo,
+    )
 
     command_handler = CommandHandler(
         project_service=project_service,
+        allow_service=allow_service,
+        active_project=active_project,
         version=whatsbot.__version__,
         started_at_monotonic=_started_at_monotonic,
         env=settings.env.value,

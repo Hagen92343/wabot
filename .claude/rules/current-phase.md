@@ -1,60 +1,58 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 2 — Projekt-Management + Smart-Detection
-**Aktiver Checkpoint**: C2.4 (`/allow batch approve` + `/allow batch review` + `/allow`/`/deny`/`/allowlist`)
-**Letzter abgeschlossener Checkpoint**: C2.3 (Smart-Detection für 9 Artefakt-Stacks)
+**Aktiver Checkpoint**: C2.7 (`/rm <name>` + PIN + Trash)
+**Letzter abgeschlossener Checkpoint**: C2.4 + C2.5 (Allow-Rule-Management + Active-Project)
 
-## Phase-2-Fortschritt: 3/8 Checkpoints
+## Phase-2-Fortschritt: 5/8 Checkpoints
 
 - ✅ C2.1 — `/new <name>` empty + `/ls`
 - ✅ C2.2 — `/new <name> git <url>` + URL-Whitelist + Smart-Detection-Stub
 - ✅ C2.3 — Smart-Detection für alle 9 Artefakt-Stacks
-- ⏳ C2.4 — Allow-Rule-Management (folgt jetzt)
-- ⏳ C2.5 — `/allow` / `/deny` / `/allowlist` manuell
-- ⏳ C2.6 — URL-Whitelist Tests (eigentlich schon in C2.2 abgedeckt — evtl. zusammenfassen)
-- ⏳ C2.7 — `/rm <n>` mit PIN + Trash
-- ⏳ C2.8 — Tests grün
+- ✅ C2.4 — `/allow batch approve` + `/allow batch review`
+- ✅ C2.5 — `/allow <pat>` + `/deny <pat>` + `/allowlist` + `/p`/`/p <name>`
+       (zusammen mit C2.4 abgeschlossen)
+- ⏳ C2.6 — URL-Whitelist Tests (eigentlich schon in C2.2 voll abgedeckt;
+       als separater Checkpoint nicht nötig — wird mit C2.7 zusammengezogen)
+- ⏳ C2.7 — `/rm <n>` mit 60s-Confirm + PIN + Trash (folgt jetzt)
+- ⏳ C2.8 — Tests grün + finale Phase-2-Verifikation
 
-## Was als Nächstes zu tun ist (C2.4)
+## Was als Nächstes zu tun ist (C2.7)
 
-C2.4 laut `phase-2.md` "Allow-Rule-Management":
+C2.7 laut `phase-2.md` "Trash-Mechanismus":
 
-1. `domain/allow_rules.py` — pure Logic
-   - `parse_pattern("Bash(npm test)") → AllowRule(tool="Bash", pattern="npm test")`
-   - Validierung: Tool aus erlaubter Liste (Bash, Write, Edit, Read, Grep, Glob),
-     pattern non-empty, kein nested ()
-2. `ports/allow_rule_repository.py` + sqlite-adapter
-   - Persistiert in `allow_rules`-Tabelle (Spec §19)
-   - source: 'default', 'smart_detection', 'manual'
-3. `application/allow_service.py`
-   - `add_rule(project, tool, pattern, source)` — DB + .claude/settings.json sync
-   - `remove_rule(...)` — analog
-   - `list_rules(project)` — gruppiert nach source
-   - `apply_suggested(project)` — liest .whatsbot/suggested-rules.json,
-     ruft add_rule für jede, löscht die Vorschlags-Datei
+1. `domain/pending_deletes.py` — pure Logic für Deadline-Checks (60s)
+2. `ports/pending_delete_repository.py` + sqlite-adapter (gegen
+   `pending_deletes`-Tabelle, Spec §19)
+3. `application/delete_service.py` — Use-Cases:
+   - `request_delete(name)` → erzeugt pending_deletes-Row mit
+     `deadline_ts = now + 60s`
+   - `confirm_delete(name, pin)` → PIN gegen Keychain `panic-pin`,
+     mv project to ~/.Trash/whatsbot-<name>-<timestamp>, DELETE row,
+     CASCADE entfernt allow_rules etc.
+   - `cleanup_expired()` → löscht abgelaufene pending_deletes-Rows
 4. `command_handler.py`:
-   - `/allow batch approve` (per active project)
-   - `/allow batch review` — listet Vorschläge mit numbers
-   - `/allowlist` — zeigt aktuelle Liste
-5. Voraussetzung: Active-Project-Tracking (`/p <name>`) — ein leichter
-   Vorgriff aus C2.5, weil Allow-Rules per Projekt sind. Lege ich
-   minimal in C2.4 mit an: `app_state` Row `active_project`,
-   `/p <n>` und `/p` (zeigt aktives) Commands.
+   - `/rm <name>` → request_delete
+   - `/rm <name> <PIN>` → confirm_delete
+5. PIN-Auth via existing `KeychainProvider.get(KEY_PANIC_PIN)`
+6. Tests + Live-Smoke
 
-Verifikation (C2.4 done):
-- `/new alpha git https://github.com/octocat/Hello-World` → Vorschläge
-- `/p alpha` → setzt aktiv
-- `/allow batch review` → zeigt 7 Vorschläge nummeriert
-- `/allow batch approve` → schreibt Rules, löscht suggested-rules.json
-- `~/projekte/alpha/.claude/settings.json` enthält permissions.allow Array
-- `/allowlist` → 7 Einträge gruppiert nach `smart_detection`
+Verifikation (C2.7 done):
+- `/new alpha`
+- `/rm alpha` → "🗑 Bestätige mit /rm alpha <PIN>"
+- 70s warten → expired (oder via cleanup-trigger)
+- `/rm alpha` (neu) + `/rm alpha <wrong-pin>` → "⚠️ falsche PIN"
+- `/rm alpha <correct-pin>` → "🗑 Gelöscht (in Trash)"
+- `~/.Trash/whatsbot-alpha-*` existiert
+- `/ls` zeigt alpha nicht mehr
+- `allow_rules` für alpha sind via CASCADE weg
 
 ## Format-Konvention für Updates
 
 ```
 **Aktive Phase**: Phase 2 — Projekt-Management + Smart-Detection
-**Aktiver Checkpoint**: C2.5 (`/allow`/`/deny`/`/allowlist` manuell)
-**Letzter abgeschlossener Checkpoint**: C2.4 (Allow-Rule-Management batch)
+**Aktiver Checkpoint**: C2.8 (Tests grün + Phase-2-Verifikation)
+**Letzter abgeschlossener Checkpoint**: C2.7 (`/rm` + PIN + Trash)
 ```
 
 ## Hinweis bei Session-Start
