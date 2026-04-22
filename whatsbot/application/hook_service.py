@@ -1,30 +1,68 @@
 """HookService — orchestrates the Pre-Tool-Hook decision flow.
 
-C3.1 scope: *infrastructure*. The service classifies every Bash/Write/
-Edit call as ``Allow`` by default so the hook round-trip can be
-verified end-to-end before any real policy lands. The full pipeline
-(deny-patterns, allow-rules, path-rules, PIN confirmation) gets layered
-on in C3.2–C3.3 without changing this module's signature — callers
-already receive ``HookDecision``.
+C3.2 scope: the real policy is now live — ``evaluate_bash`` from the
+domain runs against the project's mode + allow-list, deny-patterns
+always fire even in YOLO, and the AskUser branch is delegated to a
+``ConfirmationCoordinator`` that performs the async round-trip with
+the user's WhatsApp.
 
-Keeping the service intentionally boring here is deliberate: Phase 3's
-very first checkpoint is "the wire works end-to-end", and mixing that
-with the 17-pattern blacklist would make failures hard to localise.
+Write/Edit classification is still the C3.1 allow-by-default stub —
+``path_rules`` land in a subsequent checkpoint.
+
+Dependency wiring intentionally has two shapes:
+
+* **Fully wired** (production): ``project_repo``, ``allow_rule_repo``
+  and ``coordinator`` are all supplied. Bash is fully policed; AskUser
+  opens a confirmation and awaits the user.
+* **Stub mode** (unit tests that only exercise the hook HTTP
+  contract): the coordinator is ``None``. We fall back to the
+  conservative decisions that mirror the C3.1 stub — allow every call
+  so the round-trip can be verified without provisioning state.
+
+Keeping both wirings viable is pragmatic: existing integration tests
+for the hook endpoint stay simple, and Phase 4's Claude-launch work
+can bolt on the production wiring when the project + allow-rule
+sources are already in the app.
 """
 
 from __future__ import annotations
 
-from whatsbot.domain.hook_decisions import HookDecision, allow
+from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
+from whatsbot.domain.hook_decisions import (
+    HookDecision,
+    Verdict,
+    allow,
+    evaluate_bash,
+)
+from whatsbot.domain.projects import Mode
 from whatsbot.logging_setup import get_logger
+from whatsbot.ports.allow_rule_repository import AllowRuleRepository
+from whatsbot.ports.project_repository import (
+    ProjectNotFoundError,
+    ProjectRepository,
+)
 
 
 class HookService:
-    """Classifies hook invocations. Stateless in C3.1."""
+    """Classifies Pre-Tool-Hook invocations."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        project_repo: ProjectRepository | None = None,
+        allow_rule_repo: AllowRuleRepository | None = None,
+        coordinator: ConfirmationCoordinator | None = None,
+        recipient: str | None = None,
+    ) -> None:
+        self._projects = project_repo
+        self._rules = allow_rule_repo
+        self._coordinator = coordinator
+        self._recipient = recipient
         self._log = get_logger("whatsbot.hook")
 
-    def classify_bash(
+    # ---- Bash --------------------------------------------------------
+
+    async def classify_bash(
         self,
         *,
         command: str,
@@ -33,18 +71,49 @@ class HookService:
     ) -> HookDecision:
         """Decide what to do with a Bash invocation.
 
-        C3.1 always returns ``allow`` — the decision matrix lands in
-        C3.2. The logging contract is already in place so when C3.2
-        hooks in the deny-patterns, we only extend, not rewrite.
+        Flow:
+          1. If the coordinator is not wired, fall back to allow — the
+             endpoint is in stub mode and policing is deferred.
+          2. Otherwise run ``evaluate_bash`` against ``(mode, allow-list)``.
+          3. If the verdict is AskUser, delegate the async round-trip
+             to the coordinator.
         """
+        if self._coordinator is None:
+            self._log.info(
+                "hook_bash_classified",
+                command_preview=_preview(command),
+                project=project,
+                session_id=session_id,
+                verdict="allow",
+                mode="stub",
+            )
+            return allow("hook_service stub: coordinator not wired")
+
+        mode, allow_patterns = self._project_context(project)
+        decision = evaluate_bash(command, mode=mode, allow_patterns=allow_patterns)
+
         self._log.info(
             "hook_bash_classified",
             command_preview=_preview(command),
             project=project,
             session_id=session_id,
-            verdict="allow",
+            verdict=decision.verdict.value,
+            mode=mode.value,
+            allow_patterns=len(allow_patterns),
         )
-        return allow("c3.1 stub: allow-by-default")
+
+        if decision.verdict is not Verdict.ASK_USER:
+            return decision
+
+        return await self._coordinator.ask_bash(
+            command=command,
+            project=project,
+            reason=decision.reason,
+            msg_id=session_id,
+            recipient=self._recipient,
+        )
+
+    # ---- Write / Edit -----------------------------------------------
 
     def classify_write(
         self,
@@ -55,8 +124,10 @@ class HookService:
     ) -> HookDecision:
         """Decide what to do with a Write/Edit invocation.
 
-        Same deal as ``classify_bash`` — allow-by-default for now,
-        path-rules land in C3.2.
+        C3.2 keeps the allow-by-default stub — ``path_rules`` lands
+        in a later checkpoint. Native write-protection for ``.git``,
+        ``.claude`` etc. is enforced inside Claude Code already, so
+        this stub doesn't create a dangerous gap in practice.
         """
         self._log.info(
             "hook_write_classified",
@@ -64,8 +135,29 @@ class HookService:
             project=project,
             session_id=session_id,
             verdict="allow",
+            mode="stub",
         )
-        return allow("c3.1 stub: allow-by-default")
+        return allow("hook_service stub: path-rules not yet wired")
+
+    # ---- helpers ----------------------------------------------------
+
+    def _project_context(self, project: str | None) -> tuple[Mode, list[str]]:
+        """Return ``(mode, bash_allow_patterns)`` for ``project``.
+
+        Fail-closed: unknown projects default to Normal + empty
+        allow-list, which routes non-deny-matching commands to
+        AskUser — safer than assuming YOLO.
+        """
+        if project is None or self._projects is None or self._rules is None:
+            return Mode.NORMAL, []
+        try:
+            project_row = self._projects.get(project)
+        except ProjectNotFoundError:
+            self._log.warning("hook_project_unknown", project=project)
+            return Mode.NORMAL, []
+        rules = self._rules.list_for_project(project)
+        patterns = [r.pattern.pattern for r in rules if r.pattern.tool == "Bash"]
+        return project_row.mode, patterns
 
 
 def _preview(value: str, *, max_len: int = 200) -> str:

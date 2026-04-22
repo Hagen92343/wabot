@@ -25,6 +25,9 @@ from whatsbot.adapters.sqlite_allow_rule_repository import (
 from whatsbot.adapters.sqlite_app_state_repository import (
     SqliteAppStateRepository,
 )
+from whatsbot.adapters.sqlite_pending_confirmation_repository import (
+    SqlitePendingConfirmationRepository,
+)
 from whatsbot.adapters.sqlite_pending_delete_repository import (
     SqlitePendingDeleteRepository,
 )
@@ -35,17 +38,23 @@ from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
 from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.allow_service import AllowService
 from whatsbot.application.command_handler import CommandHandler
+from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.application.delete_service import DeleteService
 from whatsbot.application.hook_service import HookService
 from whatsbot.application.project_service import ProjectService
 from whatsbot.config import Environment, Settings, assert_secrets_present
+from whatsbot.domain import whitelist
 from whatsbot.http.hook_endpoint import build_router as build_hook_router
 from whatsbot.http.meta_webhook import build_router as build_webhook_router
 from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddleware
 from whatsbot.logging_setup import configure_logging, get_logger
 from whatsbot.ports.git_clone import GitClone
 from whatsbot.ports.message_sender import MessageSender
-from whatsbot.ports.secrets_provider import SecretsProvider
+from whatsbot.ports.secrets_provider import (
+    KEY_ALLOWED_SENDERS,
+    SecretNotFoundError,
+    SecretsProvider,
+)
 
 _started_at_monotonic: Final[float] = time.monotonic()
 
@@ -124,6 +133,17 @@ def create_app(
         projects_root=projects_root,
     )
 
+    # Hook confirmation coordinator (Spec §7 PIN round-trip). Bound to
+    # the same event loop as the Meta webhook handler and the hook
+    # endpoint so Future.set_result crosses safely between them.
+    pending_confirmation_repo = SqlitePendingConfirmationRepository(conn)
+    default_recipient = _first_allowed_sender(secrets_for_router)
+    coordinator = ConfirmationCoordinator(
+        repo=pending_confirmation_repo,
+        sender=sender,
+        default_recipient=default_recipient,
+    )
+
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
@@ -151,8 +171,14 @@ def create_app(
             secrets=secrets_for_router,
             sender=sender,
             command_handler=command_handler,
+            coordinator=coordinator,
         )
     )
+    # Stash the coordinator on the app state so ``create_hook_app``
+    # (same process, different FastAPI instance) can reuse it.
+    app.state.coordinator = coordinator
+    app.state.project_repo = project_repo
+    app.state.allow_rule_repo = SqliteAllowRuleRepository(conn)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, object]:
@@ -181,6 +207,7 @@ def create_hook_app(
     settings: Settings | None = None,
     secrets_provider: SecretsProvider | None = None,
     hook_service: HookService | None = None,
+    main_app: FastAPI | None = None,
 ) -> FastAPI:
     """Build the Pre-Tool-Hook app (Spec §7, §14).
 
@@ -189,6 +216,12 @@ def create_hook_app(
     apps share the same process in production — deploy-launchd will
     invoke this factory with ``uvicorn whatsbot.main:create_hook_app
     --factory --host 127.0.0.1 --port 8001`` alongside the main listener.
+
+    If a ``main_app`` is passed in, its coordinator + project-repo +
+    allow-rule-repo are reused so the hook round-trip shares the same
+    in-memory confirmation registry as the Meta webhook handler. This
+    is the Phase-4 wiring path; stand-alone hook-app tests keep using
+    the stub ``HookService`` with no deps.
     """
     settings = settings if settings is not None else Settings.from_env()
     configure_logging(
@@ -202,7 +235,14 @@ def create_hook_app(
             KeychainProvider() if settings.env is not Environment.TEST else _EmptySecretsProvider()
         )
     if hook_service is None:
-        hook_service = HookService()
+        if main_app is not None:
+            hook_service = HookService(
+                project_repo=main_app.state.project_repo,
+                allow_rule_repo=main_app.state.allow_rule_repo,
+                coordinator=main_app.state.coordinator,
+            )
+        else:
+            hook_service = HookService()
 
     app = FastAPI(
         title="whatsbot-hook",
@@ -232,6 +272,20 @@ def _open_state_db_for(settings: Settings) -> sqlite3.Connection:
     """Open the spec-§4 state DB. Centralised so tests can monkeypatch
     if they need to redirect production-path access."""
     return open_state_db(db_path=settings.db_path, backup_dir=settings.backup_dir)
+
+
+def _first_allowed_sender(secrets_provider: SecretsProvider) -> str | None:
+    """Return the first whitelisted WhatsApp number (used as the default
+    recipient for unsolicited bot messages like hook-confirmation
+    prompts). ``None`` if the whitelist is empty/missing."""
+    try:
+        raw = secrets_provider.get(KEY_ALLOWED_SENDERS)
+    except SecretNotFoundError:
+        return None
+    allowed = whitelist.parse_whitelist(raw)
+    if not allowed:
+        return None
+    return sorted(allowed)[0]
 
 
 class _EmptySecretsProvider:

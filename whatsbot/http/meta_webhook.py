@@ -34,6 +34,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import PlainTextResponse
 
 from whatsbot.application.command_handler import CommandHandler
+from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.config import Environment, Settings
 from whatsbot.domain import whitelist
 from whatsbot.logging_setup import get_logger
@@ -42,6 +43,7 @@ from whatsbot.ports.secrets_provider import (
     KEY_ALLOWED_SENDERS,
     KEY_META_APP_SECRET,
     KEY_META_VERIFY_TOKEN,
+    KEY_PANIC_PIN,
     SecretNotFoundError,
     SecretsProvider,
 )
@@ -134,6 +136,7 @@ def build_router(
     secrets: SecretsProvider,
     sender: MessageSender,
     command_handler: CommandHandler,
+    coordinator: ConfirmationCoordinator | None = None,
 ) -> APIRouter:
     """Construct the ``/webhook`` APIRouter with the dependencies wired in.
 
@@ -159,6 +162,13 @@ def build_router(
         app_secret = secrets.get(KEY_META_APP_SECRET)
     except SecretNotFoundError:
         app_secret = ""
+    # PIN used to resolve pending Hook confirmations via WhatsApp.
+    # Missing PIN + coordinator wired = coordinator still accepts
+    # "nein" rejections; acceptance is impossible, which is fail-closed.
+    try:
+        panic_pin = secrets.get(KEY_PANIC_PIN)
+    except SecretNotFoundError:
+        panic_pin = ""
 
     # Signature check is skipped only when we have no app secret AND we're in
     # a non-production env. In prod the secrets gate would have aborted
@@ -219,6 +229,26 @@ def build_router(
                 if not whitelist.is_allowed(msg.sender, allowed):
                     log.warning("sender_not_allowed")
                     continue
+
+                # If there is a pending Hook confirmation waiting on the
+                # user, intercept PIN / "nein" *before* routing to the
+                # normal command dispatcher — otherwise the PIN text
+                # would be swallowed as an unknown command.
+                if coordinator is not None:
+                    resolved = coordinator.try_resolve(msg.text, pin=panic_pin)
+                    if resolved is not None:
+                        reply = (
+                            "✅ Freigabe erteilt."
+                            if resolved.accepted
+                            else "🚫 Abgelehnt."
+                        )
+                        log.info(
+                            "hook_confirmation_resolved",
+                            confirmation_id=resolved.confirmation_id,
+                            accepted=resolved.accepted,
+                        )
+                        sender.send_text(to=msg.sender, body=reply)
+                        continue
 
                 result = command_handler.handle(msg.text)
                 log.info(

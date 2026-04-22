@@ -102,7 +102,7 @@ def build_router(
 
         try:
             body = await request.json()
-        except Exception:  # noqa: BLE001 — malformed JSON, treat as bad request
+        except Exception:
             log.warning("hook_bash_bad_json")
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -121,12 +121,12 @@ def build_router(
         session_id = body.get("session_id") if isinstance(body, dict) else None
 
         try:
-            decision = service.classify_bash(
+            decision = await service.classify_bash(
                 command=command,
                 project=project if isinstance(project, str) else None,
                 session_id=session_id if isinstance(session_id, str) else None,
             )
-        except Exception as exc:  # noqa: BLE001 — fail-closed on any service error
+        except Exception as exc:
             log.error("hook_bash_service_error", error=str(exc))
             decision = deny("classifier error")
 
@@ -144,7 +144,7 @@ def build_router(
 
         try:
             body = await request.json()
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("hook_write_bad_json")
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -168,7 +168,7 @@ def build_router(
                 project=project if isinstance(project, str) else None,
                 session_id=session_id if isinstance(session_id, str) else None,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error("hook_write_service_error", error=str(exc))
             decision = deny("classifier error")
 

@@ -80,7 +80,9 @@ def test_bash_allows_with_correct_secret() -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert "c3.1" in body["hookSpecificOutput"]["permissionDecisionReason"]
+    # In stub mode (no coordinator wired) the service explains why it
+    # allowed — useful when sanity-checking the hook round-trip.
+    assert "stub" in body["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_bash_missing_command_is_deny_400() -> None:
