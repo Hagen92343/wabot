@@ -1,32 +1,26 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 3 — Security-Core (Hook + Allow/Deny + Redaction)
-**Aktiver Checkpoint**: C3.4 (Input-Sanitization für verdächtige Prompts)
-**Letzter abgeschlossener Checkpoint**: C3.3 (Redaction-Pipeline, 4 Stages)
+**Aktiver Checkpoint**: C3.5 (Output-Size-Warning + /send / /discard / /save)
+**Letzter abgeschlossener Checkpoint**: C3.4 (Input-Sanitization + Audit-Log)
 
 ## Phase 3 — bisheriger Fortschritt
 
 - ✅ C3.1 — `hooks/pre_tool.py` + Shared-Secret-IPC-Endpoint auf `127.0.0.1:8001`
 - ✅ C3.2 — Deny-Patterns + PIN-Rückfrage (End-to-End + 17 Fixtures)
-- ✅ C3.3 — Redaction-Pipeline 4 Stages:
-  - `domain/redaction.py` (Stages: known-keys / struktur / entropy / path-content)
-  - `adapters/redacting_sender.py` (Decorator, sitzt vor jedem Send)
-  - Wired global in `main.create_app` — alle Outbound-Pfade bekommen Redaction
-  - 37 Unit-Tests (≥10 Secret-Typen, false-positive-Kontrollen)
-  - 7 Wire-Tests (Decorator + E2E via /webhook mit AKIA-Input)
-  - CLI: `python -m whatsbot.domain.redaction` (stdin smoke)
+- ✅ C3.3 — Redaction-Pipeline 4 Stages + globaler Sender-Decorator
+- ✅ C3.4 — Input-Sanitization:
+  - `domain/injection.py` mit `detect_triggers` + `sanitize(text, mode)`
+  - Wrap nur im Normal-Mode (Strict/YOLO Bypass)
+  - Webhook loggt `injection_suspected`-Audit-Event auf jeden Hit
+  - 30 Unit-Tests + 3 Integration-Tests
 
-**Tests**: 606/606 passing, mypy --strict clean, ruff clean.
+**Tests**: 639/639 passing, mypy --strict clean, ruff clean.
 
-## Was als Nächstes (C3.4 → C3.6)
+## Was als Nächstes (C3.5 → C3.6)
 
 Verbleibende C3-Checkpoints aus `phase-3.md`:
 
-- **C3.4** — Input-Sanitization: verdächtige Prompts in
-  `<untrusted_content suspected_injection="true">`-Tags wrappen
-  (nur Normal-Mode; Strict/YOLO Bypass).
-  Trigger-Phrasen: `"ignore previous"`, `"disregard"`, `"system:"`,
-  `"you are now"`, `"your new task"` — case-insensitive.
 - **C3.5** — Output-Size-Warning (>10KB) + `/send` / `/discard` /
   `/save` + `pending_outputs`-Zeile. Gilt in allen Modi.
 - **C3.6** — Fail-closed Integration-Test: Unreachable / 401 / Crash /
