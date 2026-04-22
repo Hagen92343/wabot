@@ -10,11 +10,30 @@ Two principles:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import structlog
 from keyring.errors import PasswordDeleteError
+
+
+@pytest.fixture(autouse=True)
+def _reset_logging_state() -> Iterator[None]:
+    """Reset structlog + stdlib logging between tests.
+
+    ``configure_logging`` caches loggers and binds contextvars, so a noisy
+    test could leak state into the next one. This fixture runs after every
+    test (autouse) to restore a clean slate.
+    """
+    yield
+    structlog.reset_defaults()
+    structlog.contextvars.clear_contextvars()
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+        handler.close()
 
 
 @pytest.fixture

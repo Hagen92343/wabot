@@ -1,30 +1,31 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 1 – Fundament + Echo-Bot
-**Aktiver Checkpoint**: C1.3 (Health-Endpoint)
-**Letzter abgeschlossener Checkpoint**: C1.2 (Keychain + DB)
+**Aktiver Checkpoint**: C1.4 (LaunchAgent)
+**Letzter abgeschlossener Checkpoint**: C1.3 (Health-Endpoint)
 
 ## Was als Nächstes zu tun ist
 
-C1.3 laut `phase-1.md` §5 + §6 + §9:
+C1.4 laut `phase-1.md` §10:
 
-1. `whatsbot/logging_setup.py` — structlog mit JSON-Renderer, RotatingFileHandler
-   für `app.jsonl`, Felder `ts/level/logger/msg_id/session_id/project/mode/event/...`
-2. `whatsbot/config.py` — Pydantic-Settings, lädt Secrets beim Start (Aufruf von
-   `verify_all_present`), `WHATSBOT_ENV` (prod|dev|test), `WHATSBOT_DRY_RUN`
-3. `whatsbot/http/middleware.py` — `CorrelationIdMiddleware` (ULID pro Request,
-   in Log-Context binden), `ConstantTimeMiddleware` (min 200ms bei Rejection,
-   gegen Timing-Enumeration)
-4. `whatsbot/main.py` — FastAPI-App mit `/health` (`{ok, version, uptime_seconds}`)
-   und `/metrics` (Prometheus-Stub leer in C1.3)
-5. Tests: `tests/unit/test_logging.py` (Format-Felder),
-   `tests/unit/test_config.py` (Secret-Loading, harter Abbruch bei Fehlen),
-   `tests/integration/test_health.py` (FastAPI TestClient → 200 JSON)
+1. `launchd/com.DOMAIN.whatsbot.plist.template` — Bot-LaunchAgent
+   - `KeepAlive` mit `SuccessfulExit: false`, `RunAtLoad: true`
+   - `EnvironmentVariables` (`SSH_AUTH_SOCK`, `WHATSBOT_ENV=prod`)
+   - `StandardErrorPath` / `StandardOutPath` ins Logs-Verzeichnis
+   - `WorkingDirectory` auf das Repo
+2. `launchd/com.DOMAIN.whatsbot.backup.plist.template` — täglich 03:00,
+   ruft `bin/backup-db.sh` (Stub für jetzt, echtes Skript in C1.7)
+3. `Makefile`: `deploy-launchd` rendert die Templates mit `DOMAIN=$(DOMAIN)`,
+   kopiert nach `~/Library/LaunchAgents/`, `launchctl bootstrap`/`enable`/`kickstart`.
+   `undeploy-launchd` umgekehrt.
+4. Tests: `tests/unit/test_launchd_template.py` (Template rendert valides plist,
+   alle Pflicht-Keys vorhanden, ENV-Var-Section korrekt)
 
-Verifikation (C1.3 done):
-- `make run-dev` startet ohne Errors
-- `curl http://localhost:8000/health` → `{"ok": true, "version": "0.1.0", "uptime_seconds": ...}`
-- `make test` grün, Coverage ≥80%
+Verifikation (C1.4 done):
+- `make deploy-launchd DOMAIN=local`
+- `launchctl list | grep whatsbot` → Bot + Backup-Agent aktiv
+- `tail ~/Library/Logs/whatsbot/app.jsonl` → `startup_complete`-Event als JSON
+- `make undeploy-launchd DOMAIN=local` läuft sauber
 
 ## Format-Konvention für Updates
 
@@ -32,8 +33,8 @@ Wenn du einen Checkpoint abschließt, update diese Datei so:
 
 ```
 **Aktive Phase**: Phase 1 – Fundament + Echo-Bot
-**Aktiver Checkpoint**: C1.4 (LaunchAgent)
-**Letzter abgeschlossener Checkpoint**: C1.3 (Health-Endpoint)
+**Aktiver Checkpoint**: C1.5 (Webhook + Echo)
+**Letzter abgeschlossener Checkpoint**: C1.4 (LaunchAgent)
 ```
 
 Wenn du eine ganze Phase abschließt:

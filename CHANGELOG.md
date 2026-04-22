@@ -7,6 +7,40 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 1 — Fundament + Echo-Bot (in progress)
 
+#### C1.3 — Logging + Config + Health-Endpoint ✅
+- `whatsbot/logging_setup.py`: structlog mit JSONRenderer, contextvars merge
+  (für `msg_id/session_id/project/mode`), TimeStamper (ISO UTC, key `ts`),
+  RotatingFileHandler nach Spec §15 (`app.jsonl`, 10 MB × 5 backups).
+  Idempotent — sichere Doppelaufrufe.
+- `whatsbot/config.py`: `Settings` (Pydantic BaseModel) mit Defaults aus
+  Spec §4 (log_dir, db_path, backup_dir, bind_host/port, hook_bind_host/port).
+  `Settings.from_env()` liest `WHATSBOT_ENV` (prod|dev|test) und
+  `WHATSBOT_DRY_RUN`. `assert_secrets_present()`: prod → harter Abbruch
+  (`SecretsValidationError`), dev → Warning + missing-Liste, test → skip.
+- `whatsbot/http/middleware.py`:
+  - `CorrelationIdMiddleware`: ULID pro Request, in structlog contextvars
+    gebunden, als `X-Correlation-Id`-Header gespiegelt, Token-Reset garantiert
+    keine Cross-Request-Kontamination.
+  - `ConstantTimeMiddleware`: padding-fähig, Path-Filter (default leer = alle,
+    in C1.5 wird es auf `("/webhook",)` gesetzt). Verhindert Timing-Enumeration
+    der Sender-Whitelist (Spec §5).
+- `whatsbot/main.py`: `create_app()`-Factory. configure_logging einmalig,
+  Secrets-Gate (skip in test, warn in dev, raise in prod), CorrelationIdMiddleware
+  global, `/health` (ok/version/uptime_seconds/env), `/metrics`-Stub
+  (PlainTextResponse, leer — echtes Prometheus in Phase 8).
+- `Makefile`: `run-dev` nutzt jetzt `--factory whatsbot.main:create_app`.
+- Tests: `test_logging.py` (6), `test_config.py` (10), `test_middleware.py` (6),
+  `test_health.py` (6). conftest hat jetzt `_reset_logging_state` autouse-Fixture.
+  **66 Tests grün, Coverage 95.97%** (Ziel ≥80%). middleware.py und
+  logging_setup.py jeweils 100%, config.py 100%, main.py 80% (dev-warning-Pfad
+  ungetestet — wird via Live-Smoke statt Unit verifiziert).
+- **Live-Smoke verifiziert**: `make run-dev` startet den Bot, `curl /health`
+  liefert das erwartete JSON inkl. `X-Correlation-Id`-Header (26-char ULID),
+  `/metrics` liefert leeres text/plain, `/does-not-exist` liefert 404 mit
+  Header (Middleware tagt auch Errors), zwei Requests bekommen verschiedene
+  Correlation-IDs, JSON-Logs schreiben sauber `secrets_missing_dev_mode` und
+  `startup_complete` mit allen Spec-§15-Feldern.
+
 #### C1.2 — Keychain-Provider + SQLite-Schema + Integrity-Restore ✅
 - `whatsbot/ports/secrets_provider.py`: `SecretsProvider`-Protocol (get/set/rotate),
   Service-Konstante `whatsbot`, die 7 Pflicht-Keys aus Spec §4 als Konstanten,

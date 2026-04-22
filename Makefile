@@ -51,7 +51,8 @@ dev-deps: ## Dev-Deps installieren (pytest, mypy, ruff, ...)
 # ---- Run --------------------------------------------------------------------
 
 run-dev: ## FastAPI mit Reload starten (WHATSBOT_ENV=dev, Signature-Check aus)
-	WHATSBOT_ENV=dev $(UVICORN) whatsbot.main:app --host 127.0.0.1 --port 8000 --reload
+	WHATSBOT_ENV=dev $(UVICORN) whatsbot.main:create_app --factory \
+		--host 127.0.0.1 --port 8000 --reload
 
 # ---- Tests ------------------------------------------------------------------
 
