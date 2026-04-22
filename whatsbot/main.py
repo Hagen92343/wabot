@@ -34,6 +34,7 @@ from whatsbot.adapters.sqlite_pending_delete_repository import (
 from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
 from whatsbot.adapters.sqlite_repo import open_state_db
 from whatsbot.adapters.subprocess_git_clone import SubprocessGitClone
+from whatsbot.adapters.redacting_sender import RedactingMessageSender
 from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
 from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.allow_service import AllowService
@@ -96,7 +97,13 @@ def create_app(
     else:
         secrets_for_router = _EmptySecretsProvider()
 
-    sender: MessageSender = message_sender if message_sender is not None else LoggingMessageSender()
+    raw_sender: MessageSender = (
+        message_sender if message_sender is not None else LoggingMessageSender()
+    )
+    # Every outgoing WhatsApp body routes through the Spec §10 redaction
+    # pipeline. The decorator is infallible: if redaction would crash
+    # (it can't today, it's pure over strings), we still want delivery.
+    sender: MessageSender = RedactingMessageSender(raw_sender)
 
     # State DB: open once per process. In test env caller injects an
     # in-memory connection; otherwise we use the real spec-§4 path.
