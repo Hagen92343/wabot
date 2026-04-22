@@ -1,4 +1,4 @@
-"""Hook decision model — pure, no I/O.
+"""Hook decision model + pure evaluators — no I/O.
 
 The Pre-Tool-Hook (Spec §7) has exactly three possible outcomes for any
 call it intercepts:
@@ -9,19 +9,35 @@ call it intercepts:
 * ``AskUser`` — open a ``pending_confirmations`` row and block the hook
                 up to 5 minutes until the user answers on WhatsApp.
 
-This module is the *domain* side of that decision: how we model the
-three outcomes. The ``AskUser`` branch only returns a carrier — the
-service layer is responsible for opening the confirmation, sending the
-WhatsApp prompt, and polling until resolution.
+This module hosts both the outcome dataclasses *and* the pure evaluator
+functions (``evaluate_bash``) that turn a command + current mode +
+allow-list into one of those outcomes. The service layer stays
+responsible for the ``AskUser`` round-trip (opening the confirmation,
+sending the WhatsApp prompt, polling until resolution).
 
-C3.1 only plumbs ``Allow``/``Deny``. ``AskUser`` gets real wiring in
-C3.2 (deny-patterns) and C3.3 (PIN confirmation flow).
+Spec §12 decision matrix, recap:
+
+============  ==================  ===================  ======================
+  mode         deny-pattern hit    allow-rule hit       neither
+============  ==================  ===================  ======================
+  normal       Deny (all modes)    Allow                AskUser
+  strict       Deny                Allow                Deny (silent)
+  yolo         Deny                Allow (irrelevant)   Allow
+============  ==================  ===================  ======================
+
+Even YOLO keeps the deny layer — that's the fail-closed guarantee for
+the 17 irreversible patterns.
 """
 
 from __future__ import annotations
 
+import fnmatch
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+
+from whatsbot.domain.deny_patterns import match_bash_command, normalize_command
+from whatsbot.domain.projects import Mode
 
 
 class Verdict(StrEnum):
@@ -71,3 +87,66 @@ def ask_user(reason: str) -> HookDecision:
     if not reason:
         raise ValueError("ask_user() requires a reason string")
     return HookDecision(verdict=Verdict.ASK_USER, reason=reason)
+
+
+# --------------------------------------------------------------------
+# evaluate_bash — the pure decision function
+# --------------------------------------------------------------------
+
+
+def _allow_match(command: str, allow_patterns: Sequence[str]) -> str | None:
+    """Return the first allow-pattern that matches ``command``, or None.
+
+    Allow-patterns stored in the DB are the *inner* pattern strings
+    extracted from ``Bash(<pattern>)`` rules — e.g. ``npm test``,
+    ``git status``, ``docker compose logs *``. Matching uses
+    ``fnmatch.fnmatchcase`` against the normalised command so we get the
+    same whitespace/quote robustness as the deny layer.
+    """
+    if not allow_patterns:
+        return None
+    normalized = normalize_command(command)
+    for pattern in allow_patterns:
+        if fnmatch.fnmatchcase(normalized, pattern):
+            return pattern
+    return None
+
+
+def evaluate_bash(
+    command: str,
+    *,
+    mode: Mode,
+    allow_patterns: Sequence[str] = (),
+) -> HookDecision:
+    """Pure decision for a Bash invocation (Spec §12 matrix).
+
+    Order of checks matters:
+
+    1. Deny-pattern (the 17 from Spec §12) — hits **every** mode,
+       including YOLO. This is the fail-closed guarantee.
+    2. Allow-pattern — an explicit whitelist entry takes precedence
+       over mode defaults.
+    3. Mode fall-through:
+         * Normal → AskUser (confirm on WhatsApp)
+         * Strict → Deny (silent — user has to switch mode to proceed)
+         * YOLO   → Allow (that's the whole point of YOLO)
+
+    ``allow_patterns`` is a sequence of pre-extracted ``Bash(...)`` inner
+    patterns — filter on the tool side before calling this function.
+    """
+    match = match_bash_command(command)
+    if match is not None:
+        return deny(
+            f"deny pattern '{match.pattern.pattern}' — {match.pattern.reason}"
+        )
+
+    allowed = _allow_match(command, allow_patterns)
+    if allowed is not None:
+        return allow(f"matched allow rule 'Bash({allowed})'")
+
+    if mode is Mode.NORMAL:
+        return ask_user("command is not in allow-list — confirm with PIN")
+    if mode is Mode.STRICT:
+        return deny("strict mode: command not in allow-list")
+    # YOLO: user explicitly accepted the risk.
+    return allow("yolo mode")
