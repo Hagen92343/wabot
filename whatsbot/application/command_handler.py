@@ -21,6 +21,13 @@ from whatsbot.application.allow_service import (
     AllowService,
     NoSuggestedRulesError,
 )
+from whatsbot.application.delete_service import (
+    DeleteService,
+    InvalidPinError,
+    NoPendingDeleteError,
+    PanicPinNotConfiguredError,
+    PendingDeleteExpiredError,
+)
 from whatsbot.application.project_service import (
     ProjectFilesystemError,
     ProjectService,
@@ -32,6 +39,7 @@ from whatsbot.domain.allow_rules import (
 )
 from whatsbot.domain.commands import CommandResult, StatusSnapshot
 from whatsbot.domain.git_url import DisallowedGitUrlError
+from whatsbot.domain.pending_deletes import CONFIRM_WINDOW_SECONDS
 from whatsbot.domain.projects import (
     InvalidProjectNameError,
     format_listing,
@@ -49,6 +57,7 @@ _P_PREFIX: Final = "/p "
 _ALLOWLIST_COMMAND: Final = "/allowlist"
 _ALLOW_PREFIX: Final = "/allow "
 _DENY_PREFIX: Final = "/deny "
+_RM_PREFIX: Final = "/rm "
 
 
 class CommandHandler:
@@ -63,6 +72,7 @@ class CommandHandler:
         project_service: ProjectService,
         allow_service: AllowService,
         active_project: ActiveProjectService,
+        delete_service: DeleteService,
         version: str,
         started_at_monotonic: float,
         env: str,
@@ -71,6 +81,7 @@ class CommandHandler:
         self._projects = project_service
         self._allow = allow_service
         self._active = active_project
+        self._delete = delete_service
         self._version = version
         self._started_at = started_at_monotonic
         self._env = env
@@ -101,6 +112,10 @@ class CommandHandler:
             return self._handle_allow(cmd[len(_ALLOW_PREFIX) :].strip())
         if cmd.startswith(_DENY_PREFIX):
             return self._handle_deny(cmd[len(_DENY_PREFIX) :].strip())
+
+        # /rm <name> [<PIN>]
+        if cmd.startswith(_RM_PREFIX):
+            return self._handle_rm(cmd[len(_RM_PREFIX) :].strip())
 
         # Phase-1 commands fall through to the pure router.
         return commands.route(cmd, self._snapshot())
@@ -333,6 +348,61 @@ class CommandHandler:
                 f"(bereits vorhanden: {len(outcome.already_present)})."
             ),
             command="/allow batch approve",
+        )
+
+    # ---- /rm <name> [<PIN>] ----------------------------------------------
+
+    def _handle_rm(self, args: str) -> CommandResult:
+        parts = args.split()
+        if len(parts) not in (1, 2):
+            return CommandResult(
+                reply=(
+                    "Verwendung:\n"
+                    "  /rm <name>         — initiiere Löschung (60s Fenster)\n"
+                    "  /rm <name> <PIN>   — bestätigen"
+                ),
+                command="/rm",
+            )
+
+        if len(parts) == 1:
+            return self._handle_rm_request(parts[0])
+        return self._handle_rm_confirm(parts[0], parts[1])
+
+    def _handle_rm_request(self, raw_name: str) -> CommandResult:
+        try:
+            pending = self._delete.request_delete(raw_name)
+        except InvalidProjectNameError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/rm")
+        except ProjectNotFoundError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/rm")
+        return CommandResult(
+            reply=(
+                f"🗑 Bestätige mit /rm {pending.project_name} <PIN> "
+                f"innerhalb {CONFIRM_WINDOW_SECONDS}s."
+            ),
+            command="/rm",
+        )
+
+    def _handle_rm_confirm(self, raw_name: str, pin: str) -> CommandResult:
+        try:
+            outcome = self._delete.confirm_delete(raw_name, pin)
+        except InvalidProjectNameError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/rm")
+        except NoPendingDeleteError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/rm")
+        except PendingDeleteExpiredError as exc:
+            return CommandResult(reply=f"⌛ {exc}", command="/rm")
+        except InvalidPinError:
+            return CommandResult(reply="⚠️ Falsche PIN.", command="/rm")
+        except PanicPinNotConfiguredError as exc:
+            self._log.error("panic_pin_missing", error=str(exc))
+            return CommandResult(reply=f"⚠️ {exc}", command="/rm")
+        return CommandResult(
+            reply=(
+                f"🗑 '{outcome.project_name}' gelöscht "
+                f"(verschoben nach {outcome.trashed_to})."
+            ),
+            command="/rm",
         )
 
     # ---- helpers ----------------------------------------------------------

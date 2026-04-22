@@ -12,12 +12,17 @@ import pytest
 from whatsbot.adapters import sqlite_repo
 from whatsbot.adapters.sqlite_allow_rule_repository import SqliteAllowRuleRepository
 from whatsbot.adapters.sqlite_app_state_repository import SqliteAppStateRepository
+from whatsbot.adapters.sqlite_pending_delete_repository import (
+    SqlitePendingDeleteRepository,
+)
 from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
 from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.allow_service import AllowService
 from whatsbot.application.command_handler import CommandHandler
+from whatsbot.application.delete_service import DeleteService
 from whatsbot.application.project_service import ProjectService
 from whatsbot.ports.git_clone import GitClone, GitCloneError
+from whatsbot.ports.secrets_provider import KEY_PANIC_PIN, SecretNotFoundError
 
 pytestmark = pytest.mark.unit
 
@@ -62,6 +67,27 @@ class StubGitClone:
             file_path.write_text(content, encoding="utf-8")
 
 
+class StubSecretsProvider:
+    """Minimal in-memory SecretsProvider. Pre-seeds the ``panic-pin`` so
+    ``/rm <name> <PIN>`` tests don't each need to plumb a real one."""
+
+    def __init__(self, secrets: dict[str, str] | None = None) -> None:
+        self._store: dict[str, str] = {KEY_PANIC_PIN: "1234"}
+        if secrets:
+            self._store.update(secrets)
+
+    def get(self, key: str) -> str:
+        if key not in self._store:
+            raise SecretNotFoundError(key)
+        return self._store[key]
+
+    def set(self, key: str, value: str) -> None:
+        self._store[key] = value
+
+    def rotate(self, key: str, new_value: str) -> None:
+        self._store[key] = new_value
+
+
 @pytest.fixture
 def conn() -> Iterator[sqlite3.Connection]:
     c = sqlite_repo.connect(":memory:")
@@ -85,10 +111,24 @@ def projects_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def trash_root(tmp_path: Path) -> Path:
+    root = tmp_path / "trash"
+    root.mkdir()
+    return root
+
+
+@pytest.fixture
+def secrets() -> StubSecretsProvider:
+    return StubSecretsProvider()
+
+
+@pytest.fixture
 def handler(
     conn: sqlite3.Connection,
     projects_root: Path,
+    trash_root: Path,
     git_clone: GitClone,
+    secrets: StubSecretsProvider,
 ) -> CommandHandler:
     project_repo = SqliteProjectRepository(conn)
     project_service = ProjectService(
@@ -102,14 +142,24 @@ def handler(
         project_repo=project_repo,
         projects_root=projects_root,
     )
+    app_state_repo = SqliteAppStateRepository(conn)
     active_project = ActiveProjectService(
-        app_state=SqliteAppStateRepository(conn),
+        app_state=app_state_repo,
         projects=project_repo,
+    )
+    delete_service = DeleteService(
+        pending_repo=SqlitePendingDeleteRepository(conn),
+        project_repo=project_repo,
+        app_state=app_state_repo,
+        secrets=secrets,
+        projects_root=projects_root,
+        trash_root=trash_root,
     )
     return CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
         active_project=active_project,
+        delete_service=delete_service,
         version="0.1.0",
         started_at_monotonic=time.monotonic(),
         env="test",
@@ -206,7 +256,11 @@ def test_new_git_rejects_invalid_name(handler: CommandHandler) -> None:
     assert "⚠️" in result.reply
 
 
-def test_new_git_clone_failure_surfaces(conn: sqlite3.Connection, projects_root: Path) -> None:
+def test_new_git_clone_failure_surfaces(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    trash_root: Path,
+) -> None:
     """When the GitClone adapter raises, the handler must surface the error
     instead of silently swallowing it."""
     failing = StubGitClone(should_fail=True, fail_message="repo not found")
@@ -222,14 +276,24 @@ def test_new_git_clone_failure_surfaces(conn: sqlite3.Connection, projects_root:
         project_repo=project_repo,
         projects_root=projects_root,
     )
+    app_state_repo = SqliteAppStateRepository(conn)
     active_project = ActiveProjectService(
-        app_state=SqliteAppStateRepository(conn),
+        app_state=app_state_repo,
         projects=project_repo,
+    )
+    delete_service = DeleteService(
+        pending_repo=SqlitePendingDeleteRepository(conn),
+        project_repo=project_repo,
+        app_state=app_state_repo,
+        secrets=StubSecretsProvider(),
+        projects_root=projects_root,
+        trash_root=trash_root,
     )
     h = CommandHandler(
         project_service=svc,
         allow_service=allow_service,
         active_project=active_project,
+        delete_service=delete_service,
         version="0.1.0",
         started_at_monotonic=time.monotonic(),
         env="test",
@@ -420,3 +484,227 @@ def test_ls_shows_multiple_projects_alphabetical(handler: CommandHandler) -> Non
     # alphabetical
     body = result.reply
     assert body.index("alpha") < body.index("mu") < body.index("zeta")
+
+
+# --- /rm -------------------------------------------------------------------
+
+
+def test_rm_usage_when_no_args(handler: CommandHandler) -> None:
+    # `/rm` alone does NOT match the `/rm ` prefix and falls through as unknown.
+    result = handler.handle("/rm")
+    assert result.command == "<unknown>"
+
+
+def test_rm_too_many_args_returns_usage(handler: CommandHandler) -> None:
+    result = handler.handle("/rm alpha 1234 extra")
+    assert result.command == "/rm"
+    assert "Verwendung" in result.reply
+
+
+def test_rm_unknown_project(handler: CommandHandler) -> None:
+    result = handler.handle("/rm ghost")
+    assert result.command == "/rm"
+    assert "⚠️" in result.reply
+    assert "ghost" in result.reply
+
+
+def test_rm_request_opens_60s_window(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    result = handler.handle("/rm alpha")
+    assert result.command == "/rm"
+    assert "🗑" in result.reply
+    assert "Bestätige" in result.reply
+    assert "60" in result.reply
+    # Project still exists before confirmation.
+    listing = handler.handle("/ls").reply
+    assert "alpha" in listing
+
+
+def test_rm_confirm_without_request(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    result = handler.handle("/rm alpha 1234")
+    assert result.command == "/rm"
+    assert "⚠️" in result.reply
+    assert "Kein offener" in result.reply
+
+
+def test_rm_confirm_wrong_pin(handler: CommandHandler) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/rm alpha")
+    result = handler.handle("/rm alpha 9999")
+    assert result.command == "/rm"
+    assert "⚠️" in result.reply
+    assert "Falsche PIN" in result.reply
+    # Project must still exist — wrong PIN does not destroy the pending
+    # state, so the user can retry.
+    listing = handler.handle("/ls").reply
+    assert "alpha" in listing
+
+
+def test_rm_confirm_success_moves_to_trash(
+    handler: CommandHandler,
+    projects_root: Path,
+    trash_root: Path,
+) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/rm alpha")
+    result = handler.handle("/rm alpha 1234")
+    assert result.command == "/rm"
+    assert "🗑" in result.reply
+    assert "gelöscht" in result.reply
+
+    # Project dir gone from projekte/, a copy in trash_root/whatsbot-alpha-*
+    assert not (projects_root / "alpha").exists()
+    matches = list(trash_root.glob("whatsbot-alpha-*"))
+    assert len(matches) == 1
+    assert matches[0].is_dir()
+
+    # /ls no longer shows alpha.
+    assert "alpha" not in handler.handle("/ls").reply
+
+
+def test_rm_confirm_cascades_allow_rules(
+    handler: CommandHandler,
+    conn: sqlite3.Connection,
+) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    handler.handle("/allow Bash(echo hi)")
+    # Precondition: rule is there.
+    rows_before = conn.execute(
+        "SELECT COUNT(*) FROM allow_rules WHERE project_name = 'alpha'"
+    ).fetchone()[0]
+    assert rows_before == 1
+
+    handler.handle("/rm alpha")
+    handler.handle("/rm alpha 1234")
+
+    # CASCADE from projects -> allow_rules must have wiped them.
+    rows_after = conn.execute(
+        "SELECT COUNT(*) FROM allow_rules WHERE project_name = 'alpha'"
+    ).fetchone()[0]
+    assert rows_after == 0
+
+
+def test_rm_confirm_clears_active_project(
+    handler: CommandHandler,
+    conn: sqlite3.Connection,
+) -> None:
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    handler.handle("/rm alpha")
+    handler.handle("/rm alpha 1234")
+
+    # app_state.active_project must be cleared.
+    row = conn.execute(
+        "SELECT value FROM app_state WHERE key = 'active_project'"
+    ).fetchone()
+    assert row is None
+
+
+def test_rm_expired_window(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    trash_root: Path,
+    git_clone: GitClone,
+    secrets: StubSecretsProvider,
+) -> None:
+    """Simulate the 60s expiry by injecting a stepped clock."""
+    project_repo = SqliteProjectRepository(conn)
+    project_service = ProjectService(
+        repository=project_repo,
+        conn=conn,
+        projects_root=projects_root,
+        git_clone=git_clone,
+    )
+    allow_service = AllowService(
+        rule_repo=SqliteAllowRuleRepository(conn),
+        project_repo=project_repo,
+        projects_root=projects_root,
+    )
+    app_state_repo = SqliteAppStateRepository(conn)
+    active_project = ActiveProjectService(
+        app_state=app_state_repo,
+        projects=project_repo,
+    )
+
+    times = iter([1_000, 1_070])  # request at t=1000, confirm 70s later
+    delete_service = DeleteService(
+        pending_repo=SqlitePendingDeleteRepository(conn),
+        project_repo=project_repo,
+        app_state=app_state_repo,
+        secrets=secrets,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        clock=lambda: next(times),
+    )
+    h = CommandHandler(
+        project_service=project_service,
+        allow_service=allow_service,
+        active_project=active_project,
+        delete_service=delete_service,
+        version="0.1.0",
+        started_at_monotonic=time.monotonic(),
+        env="test",
+    )
+
+    h.handle("/new alpha")
+    h.handle("/rm alpha")  # clock=1000 → deadline=1060
+    result = h.handle("/rm alpha 1234")  # clock=1070 → expired
+    assert "⌛" in result.reply
+    assert "abgelaufen" in result.reply
+    # Project still exists — expiry never removes the tree.
+    assert (projects_root / "alpha").exists()
+
+
+def test_rm_missing_panic_pin(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    trash_root: Path,
+    git_clone: GitClone,
+) -> None:
+    """If the Keychain has no panic-pin, /rm X <pin> must refuse cleanly
+    instead of letting any PIN through."""
+    empty_secrets = StubSecretsProvider(secrets={})
+    # Remove the default pre-seeded PIN.
+    empty_secrets._store.pop(KEY_PANIC_PIN, None)
+
+    project_repo = SqliteProjectRepository(conn)
+    project_service = ProjectService(
+        repository=project_repo,
+        conn=conn,
+        projects_root=projects_root,
+        git_clone=git_clone,
+    )
+    allow_service = AllowService(
+        rule_repo=SqliteAllowRuleRepository(conn),
+        project_repo=project_repo,
+        projects_root=projects_root,
+    )
+    app_state_repo = SqliteAppStateRepository(conn)
+    active_project = ActiveProjectService(
+        app_state=app_state_repo,
+        projects=project_repo,
+    )
+    delete_service = DeleteService(
+        pending_repo=SqlitePendingDeleteRepository(conn),
+        project_repo=project_repo,
+        app_state=app_state_repo,
+        secrets=empty_secrets,
+        projects_root=projects_root,
+        trash_root=trash_root,
+    )
+    h = CommandHandler(
+        project_service=project_service,
+        allow_service=allow_service,
+        active_project=active_project,
+        delete_service=delete_service,
+        version="0.1.0",
+        started_at_monotonic=time.monotonic(),
+        env="test",
+    )
+    h.handle("/new alpha")
+    h.handle("/rm alpha")
+    result = h.handle("/rm alpha 1234")
+    assert "⚠️" in result.reply
+    assert "Panic-PIN" in result.reply

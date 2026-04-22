@@ -7,6 +7,54 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 2 — Projekt-Management + Smart-Detection (in progress)
 
+#### C2.7 — `/rm` mit 60s-Fenster, PIN + Trash ✅
+
+- **`whatsbot/domain/pending_deletes.py`**: pure Dataclass `PendingDelete`
+  mit `is_expired` + `seconds_left`. Konstante `CONFIRM_WINDOW_SECONDS = 60`
+  wird vom Handler geteilt, damit Text und DB-Deadline nicht auseinanderlaufen
+  können. `compute_deadline(now_ts, window)` als freies Helper, verweigert
+  negative Fenster.
+- **`whatsbot/ports/pending_delete_repository.py`** + **`adapters/sqlite_pending_delete_repository.py`**:
+  UPSERT (zweites `/rm` vor Ablauf resettet nur die Deadline), `get`,
+  `delete` (bool), `delete_expired(now_ts)` für Sweeper. Gegen die
+  `pending_deletes`-Tabelle aus Spec §19, die keine FK zu `projects` hat —
+  der Service ist für das Cleanup zuständig.
+- **`whatsbot/application/delete_service.py`**:
+  - `request_delete(name)` validiert Name + Existenz, setzt Deadline,
+    upserted Row, gibt `PendingDelete` zurück.
+  - `confirm_delete(name, pin)` prüft: Pending-Row existiert →
+    Deadline nicht abgelaufen (abgelaufen räumt stale Row direkt weg) →
+    PIN via `hmac.compare_digest` gegen Keychain `panic-pin` → `mv`
+    Projekt-Tree nach `~/.Trash/whatsbot-<name>-<YYYYMMDDTHHMMSS>`
+    (mit Kollisions-Suffix falls exakt gleiche Sekunde) → `projects`-Row
+    löschen (CASCADE wipet `allow_rules`, `claude_sessions`, `session_locks`)
+    → pending Row wegräumen → aktives Projekt clearen wenn es der gelöschte
+    Name war.
+  - `cleanup_expired()` für späteren Sweeper-Einsatz.
+  - Fünf distinkte Exception-Klassen (`NoPendingDeleteError`,
+    `PendingDeleteExpiredError`, `InvalidPinError`, `PanicPinNotConfiguredError`
+    + bestehende `ProjectNotFoundError` / `InvalidProjectNameError`) —
+    der Command-Handler mappt sie in unterschiedliche WhatsApp-Replies.
+  - Clock ist injizierbar (`clock: Callable[[], int]`), Tests simulieren
+    die 60s-Frist deterministisch statt mit `time.sleep`.
+- **`whatsbot/application/command_handler.py`**: `/rm <name>` + `/rm <name>
+  <PIN>` routen zu Request bzw. Confirm. Ein-Argument-Fall listet die 60s
+  im Reply, Wrong-PIN und Expired liefern getrennte Emojis (`⚠️` / `⌛`).
+  `/rm` ohne Argumente fällt wie `/new` auf den Pure-Router als `<unknown>`
+  durch (Arity-Match via Prefix).
+- **`whatsbot/main.py`**: `DeleteService` wird gewired, `SqliteAppStateRepository`
+  wandert aus der Active-Project-Initialisierung in eine geteilte Variable
+  (Delete-Service braucht sie für den Active-Project-Clear).
+- Tests (26 neu, 373 total): `test_pending_deletes` (5),
+  `test_sqlite_pending_delete_repository` (8), `test_delete_service` (13),
+  `/rm`-Abschnitt in `test_command_handler` (10). Abgedeckt:
+  Expired-Window mit gestepptem Clock, Wrong-PIN behält Pending-Row,
+  CASCADE wiped `allow_rules`, aktives Projekt wird gecleart, fehlende
+  Panic-PIN surfaced als klare Fehlermeldung statt stillschweigend jede
+  PIN akzeptieren, missing Project-Dir (User hat manuell gelöscht) führt
+  trotzdem zu cleanem DB-Confirm. mypy strict grün.
+- **Live-Smoke**: noch ausstehend (wird mit C2.8 zusammen gemacht).
+
 #### C2.4 / C2.5 — Allow-Rule-Management + `/p` Active-Project ✅
 *(C2.4 + C2.5 zusammen abgehandelt — die Manual-Rules-Commands aus C2.5 fielen
 beim Wiren des batch-Flows quasi mit ab.)*

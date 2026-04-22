@@ -25,6 +25,9 @@ from whatsbot.adapters.sqlite_allow_rule_repository import (
 from whatsbot.adapters.sqlite_app_state_repository import (
     SqliteAppStateRepository,
 )
+from whatsbot.adapters.sqlite_pending_delete_repository import (
+    SqlitePendingDeleteRepository,
+)
 from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
 from whatsbot.adapters.sqlite_repo import open_state_db
 from whatsbot.adapters.subprocess_git_clone import SubprocessGitClone
@@ -32,6 +35,7 @@ from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
 from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.allow_service import AllowService
 from whatsbot.application.command_handler import CommandHandler
+from whatsbot.application.delete_service import DeleteService
 from whatsbot.application.project_service import ProjectService
 from whatsbot.config import Environment, Settings, assert_secrets_present
 from whatsbot.http.meta_webhook import build_router as build_webhook_router
@@ -105,15 +109,24 @@ def create_app(
         project_repo=project_repo,
         projects_root=projects_root,
     )
+    app_state_repo = SqliteAppStateRepository(conn)
     active_project = ActiveProjectService(
-        app_state=SqliteAppStateRepository(conn),
+        app_state=app_state_repo,
         projects=project_repo,
+    )
+    delete_service = DeleteService(
+        pending_repo=SqlitePendingDeleteRepository(conn),
+        project_repo=project_repo,
+        app_state=app_state_repo,
+        secrets=secrets_for_router,
+        projects_root=projects_root,
     )
 
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
         active_project=active_project,
+        delete_service=delete_service,
         version=whatsbot.__version__,
         started_at_monotonic=_started_at_monotonic,
         env=settings.env.value,
