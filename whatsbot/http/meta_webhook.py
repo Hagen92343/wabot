@@ -37,6 +37,7 @@ from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.config import Environment, Settings
 from whatsbot.domain import whitelist
+from whatsbot.domain.injection import detect_triggers
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.message_sender import MessageSender
 from whatsbot.ports.secrets_provider import (
@@ -229,6 +230,18 @@ def build_router(
                 if not whitelist.is_allowed(msg.sender, allowed):
                     log.warning("sender_not_allowed")
                     continue
+
+                # Spec §9 injection telegraph detection — audit-only for
+                # now. Phase 4 will actually wrap the text via
+                # ``domain.injection.sanitize`` when forwarding to Claude;
+                # today we just record the signal for forensic review.
+                triggers = detect_triggers(msg.text)
+                if triggers:
+                    log.warning(
+                        "injection_suspected",
+                        triggers=list(triggers),
+                        text_len=len(msg.text),
+                    )
 
                 # If there is a pending Hook confirmation waiting on the
                 # user, intercept PIN / "nein" *before* routing to the
