@@ -36,8 +36,10 @@ from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.allow_service import AllowService
 from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.delete_service import DeleteService
+from whatsbot.application.hook_service import HookService
 from whatsbot.application.project_service import ProjectService
 from whatsbot.config import Environment, Settings, assert_secrets_present
+from whatsbot.http.hook_endpoint import build_router as build_hook_router
 from whatsbot.http.meta_webhook import build_router as build_webhook_router
 from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddleware
 from whatsbot.logging_setup import configure_logging, get_logger
@@ -170,6 +172,57 @@ def create_app(
         "startup_complete",
         env=settings.env.value,
         dry_run=settings.dry_run,
+        version=whatsbot.__version__,
+    )
+    return app
+
+
+def create_hook_app(
+    settings: Settings | None = None,
+    secrets_provider: SecretsProvider | None = None,
+    hook_service: HookService | None = None,
+) -> FastAPI:
+    """Build the Pre-Tool-Hook app (Spec §7, §14).
+
+    Separate FastAPI instance because Spec §14 requires it to bind only
+    to ``127.0.0.1:8001`` (the Meta webhook app is on ``:8000``). Both
+    apps share the same process in production — deploy-launchd will
+    invoke this factory with ``uvicorn whatsbot.main:create_hook_app
+    --factory --host 127.0.0.1 --port 8001`` alongside the main listener.
+    """
+    settings = settings if settings is not None else Settings.from_env()
+    configure_logging(
+        log_dir=settings.log_dir,
+        write_to_files=settings.env is not Environment.TEST,
+    )
+    log = get_logger("whatsbot.startup")
+
+    if secrets_provider is None:
+        secrets_provider = (
+            KeychainProvider() if settings.env is not Environment.TEST else _EmptySecretsProvider()
+        )
+    if hook_service is None:
+        hook_service = HookService()
+
+    app = FastAPI(
+        title="whatsbot-hook",
+        version=whatsbot.__version__,
+        description="Pre-Tool-Hook endpoint (Spec §7). Bind ONLY to 127.0.0.1.",
+    )
+    app.add_middleware(CorrelationIdMiddleware)
+    app.include_router(build_hook_router(secrets=secrets_provider, service=hook_service))
+
+    @app.get("/health", tags=["meta"])
+    async def hook_health() -> dict[str, object]:
+        return {
+            "ok": True,
+            "component": "hook",
+            "version": whatsbot.__version__,
+        }
+
+    log.info(
+        "hook_startup_complete",
+        env=settings.env.value,
         version=whatsbot.__version__,
     )
     return app

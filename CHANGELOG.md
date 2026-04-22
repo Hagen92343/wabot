@@ -5,6 +5,87 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
+### Phase 3 — Security-Core (in progress)
+
+#### C3.1 — Hook-Script + Shared-Secret-IPC ✅
+
+Security-Infrastruktur steht, noch *ohne* echte Policy (allow-by-default
+im `HookService`). Die Deny-Blacklist und der AskUser-Flow kommen in
+C3.2 / C3.3, die APIs sind aber jetzt schon so aufgesetzt, dass nur
+noch die Klassifikationslogik dazukommt — keine Re-Architektur nötig.
+
+- **`whatsbot/domain/hook_decisions.py`**: `Verdict` (`ALLOW` / `DENY`
+  / `ASK_USER`) als StrEnum, `HookDecision`-Dataclass mit
+  Convenience-Konstruktoren `allow()`, `deny()`, `ask_user()`. `deny`
+  und `ask_user` erzwingen eine nicht-leere `reason` — ein Deny ohne
+  Grund wäre für den User am Handy nutzlos, und ein `ValueError` fängt
+  das in Tests statt in Production.
+- **`whatsbot/application/hook_service.py`**: `HookService.classify_bash`
+  / `classify_write`. In C3.1 returnen beide `allow()` — aber die
+  Logging-Struktur ist schon da (`hook_bash_classified` / `hook_write_classified`
+  mit project, session_id, verdict), damit C3.2 nur die Entscheidung
+  austauscht und die Log-Schema stabil bleibt. `_preview()`-Helper
+  deckelt Command-Logs bei 200 Zeichen gegen Log-Flood.
+- **`whatsbot/http/hook_endpoint.py`**: FastAPI-APIRouter mit
+  `POST /hook/bash` + `POST /hook/write`.
+  - **Shared-Secret**: Header `X-Whatsbot-Hook-Secret` wird bei
+    Router-Build einmal aus Keychain (`hook-shared-secret`) geladen,
+    pro Request mit `hmac.compare_digest` verglichen. Fehlende
+    Keychain-Entry → jeder Request ist 401 (fail-closed by default,
+    nie drift in allow).
+  - **Decision-Serialisierung**: Spec-§7-Format
+    `{"hookSpecificOutput": {"permissionDecision": "...", "permissionDecisionReason": "..."}}`.
+    `ASK_USER` wird synchron auf `deny` collapsed — die echte
+    async-PIN-Round-Trip-Logik kommt in C3.3.
+  - **Fail-closed-Disziplin**: bad JSON → 400 + deny, fehlende
+    Felder → 400 + deny, Service-Crash → **200 + deny** (expliziter
+    Deny statt "keine Antwort", für Debugging besser).
+  - Nur `127.0.0.1`-Bind enforced beim Uvicorn-Start (separater
+    Listener auf `:8001`).
+- **`whatsbot/main.py`**: neue Factory `create_hook_app()` für den
+  zweiten Uvicorn-Listener. Teilt dieselbe Keychain, eigenes FastAPI-
+  App-Objekt, eigener Health-Endpoint. launchd-Deploy (später in
+  Phase 4-ish) startet sie via
+  `uvicorn whatsbot.main:create_hook_app --factory --host 127.0.0.1 --port 8001`.
+- **`hooks/_common.py`** + **`hooks/pre_tool.py`**:
+  - Reines stdlib — importiert das `whatsbot`-Package nicht, damit der
+    Hook auch aus einem anderen Venv oder einer kaputten Install-Pfad-
+    Situation noch läuft.
+  - Secret-Loading: `security find-generic-password -s whatsbot -a
+    hook-shared-secret -w`; `WHATSBOT_HOOK_SECRET`-Env überschreibt
+    für Tests.
+  - HTTP-Client mit kurzen Timeouts (Connect 2s, Read 10s). Jede
+    Fehlerart collapsed in `HookError` mit kurzer Begründung, die auf
+    stderr landet.
+  - Exit-Code-Contract:
+    - Exit 0 + stdout-JSON allow → Claude lässt Tool laufen
+    - Exit 0 + stdout-JSON deny → Claude refused mit Reason
+    - Exit 2 + stderr-Reason → hook-intern gescheitert (unreachable,
+      bad stdin, missing secret, unknown tool, …) — Claude behandelt
+      es als Block
+  - Read-only-Tools (`Read`/`Grep`/`Glob`) short-circuiten zu Exit 0
+    **ohne** HTTP-Call — spart Latenz auf dem Hot-Path.
+  - Unknown-Tool-Fallback ist fail-closed (Exit 2), damit neue
+    Claude-Code-Tools in Zukunft nicht still durch die Hook rutschen.
+- Tests (47 neu, 420 total):
+  - `test_hook_decisions` (9): Verdict-Werte matchen Claude-Kontrakt,
+    `deny`/`ask_user` erzwingen Reason, Frozen-Dataclass-Invariante.
+  - `test_hook_service` (4): allow-by-default-Verhalten mit/ohne
+    Projekt, huge-command-Preview.
+  - `test_hook_common` (11): Env-Secret-Override, Security-CLI fehlt,
+    Return-Code ≠ 0, empty secret, Response-Parsing mit malformed /
+    non-object / missing-block / unknown-decision / missing-reason.
+  - `test_hook_endpoint` (12): 401 bei fehlendem/falschem Secret,
+    Server-ohne-Keychain denies all, happy-path allow, 400 bei
+    malformed-JSON / missing-command, **service-crash → 200+deny**.
+  - `test_hook_script` (11): Echter uvicorn auf Ephemeral-Port,
+    Subprocess-Aufruf vom Hook-Script. Abgedeckt: happy-path Bash,
+    Write mit `file_path`-Feld, Read-Bypass ohne HTTP, wrong-secret
+    → stdout-deny, unreachable → Exit 2, empty/malformed stdin →
+    Exit 2, missing tool → Exit 2, unknown tool → Exit 2, empty
+    command → Exit 2.
+- mypy --strict clean über `whatsbot/` + `hooks/` (46 Source-Files).
+
 ### Phase 2 — Projekt-Management + Smart-Detection ✅ (complete)
 
 #### C2.8 — Phase-2-Verifikation ✅
