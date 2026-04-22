@@ -1,37 +1,46 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 3 — Security-Core (Hook + Allow/Deny + Redaction)
-**Aktiver Checkpoint**: C3.5 (Output-Size-Warning + /send / /discard / /save)
-**Letzter abgeschlossener Checkpoint**: C3.4 (Input-Sanitization + Audit-Log)
+**Aktiver Checkpoint**: C3.6 (Fail-closed Hook-Integration-Test)
+**Letzter abgeschlossener Checkpoint**: C3.5 (Output-Size-Warning + /send / /discard / /save)
 
 ## Phase 3 — bisheriger Fortschritt
 
 - ✅ C3.1 — `hooks/pre_tool.py` + Shared-Secret-IPC-Endpoint auf `127.0.0.1:8001`
 - ✅ C3.2 — Deny-Patterns + PIN-Rückfrage (End-to-End + 17 Fixtures)
 - ✅ C3.3 — Redaction-Pipeline 4 Stages + globaler Sender-Decorator
-- ✅ C3.4 — Input-Sanitization:
-  - `domain/injection.py` mit `detect_triggers` + `sanitize(text, mode)`
-  - Wrap nur im Normal-Mode (Strict/YOLO Bypass)
-  - Webhook loggt `injection_suspected`-Audit-Event auf jeden Hit
-  - 30 Unit-Tests + 3 Integration-Tests
+- ✅ C3.4 — Input-Sanitization + Audit-Log
+- ✅ C3.5 — Output-Size-Warning (>10KB):
+  - `domain/output_guard.py` (THRESHOLD 10KB, warning-text, chunker)
+  - `domain/pending_outputs.py` + Port + SQLite-Adapter
+  - `application/output_service.py` (deliver + resolve_send/discard/save)
+  - Webhook intercepts `/send` · `/discard` · `/save` vor Command-Router
+  - Webhook-Replies laufen jetzt über `output_service.deliver`
+  - 38 neue Tests (27 Unit + 11 OutputService Unit + 6 Integration)
 
-**Tests**: 639/639 passing, mypy --strict clean, ruff clean.
+**Tests**: 683/683 passing, mypy --strict clean.
 
-## Was als Nächstes (C3.5 → C3.6)
+## Was als Nächstes (C3.6)
 
-Verbleibende C3-Checkpoints aus `phase-3.md`:
+Letzter verbleibender Phase-3-Checkpoint:
 
-- **C3.5** — Output-Size-Warning (>10KB) + `/send` / `/discard` /
-  `/save` + `pending_outputs`-Zeile. Gilt in allen Modi.
-- **C3.6** — Fail-closed Integration-Test: Unreachable / 401 / Crash /
-  Timeout (die Logik ist bereits drin, aber expliziter End-to-End-
-  Test gegen das Hook-Script fehlt).
+- **C3.6** — Fail-closed Hook-Integration-Test.
+  Die Logik ist schon drin (Hook-Script + Endpoint haben Fail-
+  Closed-Pfade, Tests in `test_hook_script.py`/`test_hook_endpoint.py`
+  decken einiges ab). Was noch fehlt ist ein **expliziter End-to-End-
+  Smoke** gemäss phase-3.md C3.6:
+    - Bot läuft NICHT (Port 8001 refused) → Hook-Script Exit 2
+    - Shared-Secret-Mismatch → Hook-Script Exit 2 mit Stderr-Reason
+    - Hook-Endpoint-Crash (500) → Exit 2
+    - Malformed stdin → Exit 2
+  Der existierende `tests/integration/test_hook_script.py` hat
+  Bausteine dafür — ggf. reicht eine Zusammenfassung als
+  „fail-closed summary smoke" und ein neuer Test für den 500er-Pfad.
 
-Noch offen als Schuld aus C3.2:
-- Write-Hook hat noch den Stub-Pfad (`classify_write` = allow). Die echte
-  Path-Rules-Policy (Spec §12 Layer 3) ist im `phase-3.md`-Scope, aber nicht
-  als eigener Checkpoint vergeben — idealerweise als Teil von C3.5
-  nachziehen.
+Offen als Schuld aus C3.2 + C3.5:
+- Write-Hook-Stub (`classify_write` = allow). Die echte Path-Rules-
+  Policy (Spec §12 Layer 3) bleibt für Phase 4 oder einen
+  nachgezogenen C3.7 liegen.
 
 ## Format-Konvention für Updates
 
