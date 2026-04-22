@@ -1,0 +1,60 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- whatsbot runtime artifacts (NEVER committed) ---
+state.db
+state.db-journal
+state.db-wal
+state.db-shm
+*.jsonl
+.whatsbot/
+~/Backups/
+secrets.local
+.env
+.env.*
+!.env.example
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- LaunchAgent (rendered, contains DOMAIN) ---
+launchd/*.plist
+!launchd/*.plist.template
+
+# --- Local notes ---
+TODO.local.md
+NOTES.local.md
