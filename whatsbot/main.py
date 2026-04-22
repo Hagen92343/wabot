@@ -21,6 +21,7 @@ import whatsbot
 from whatsbot.adapters.keychain_provider import KeychainProvider
 from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
 from whatsbot.adapters.sqlite_repo import open_state_db
+from whatsbot.adapters.subprocess_git_clone import SubprocessGitClone
 from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
 from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.project_service import ProjectService
@@ -28,6 +29,7 @@ from whatsbot.config import Environment, Settings, assert_secrets_present
 from whatsbot.http.meta_webhook import build_router as build_webhook_router
 from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddleware
 from whatsbot.logging_setup import configure_logging, get_logger
+from whatsbot.ports.git_clone import GitClone
 from whatsbot.ports.message_sender import MessageSender
 from whatsbot.ports.secrets_provider import SecretsProvider
 
@@ -39,6 +41,8 @@ def create_app(
     secrets_provider: SecretsProvider | None = None,
     message_sender: MessageSender | None = None,
     db_connection: sqlite3.Connection | None = None,
+    git_clone: GitClone | None = None,
+    projects_root: Path | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -75,15 +79,17 @@ def create_app(
     # in-memory connection; otherwise we use the real spec-§4 path.
     conn = db_connection if db_connection is not None else _open_state_db_for(settings)
 
-    # Project store on disk: ~/projekte/<name>/. Configurable via env later
-    # if needed, hardcoded for now matching the spec default.
-    projects_root = Path.home() / "projekte"
+    # Project store on disk: ~/projekte/<name>/. Tests inject a tmp path.
+    projects_root = projects_root if projects_root is not None else Path.home() / "projekte"
     projects_root.mkdir(parents=True, exist_ok=True)
+
+    git_clone_adapter: GitClone = git_clone if git_clone is not None else SubprocessGitClone()
 
     project_service = ProjectService(
         repository=SqliteProjectRepository(conn),
         conn=conn,
         projects_root=projects_root,
+        git_clone=git_clone_adapter,
     )
 
     command_handler = CommandHandler(

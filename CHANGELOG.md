@@ -7,6 +7,58 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 2 — Projekt-Management + Smart-Detection (in progress)
 
+#### C2.2 — `/new <name> git <url>` + URL-Whitelist + Smart-Detection-Stub ✅
+- `whatsbot/domain/git_url.py`: URL-Whitelist (Spec §13). Pure Validation,
+  drei Schemas (https / git@ / ssh://), drei Hosts (github / gitlab /
+  bitbucket). Lehnt http://, ftp://, file:// und Shell-Injection-Versuche
+  ab. `DisallowedGitUrlError` mit klarer Fehlermeldung.
+- `whatsbot/domain/smart_detection.py`: C2.2-Subset des Scanners aus
+  `phase-2.md`. Erkennt `package.json` (5 npm-Rules) und `.git/` (7
+  git-Rules). Restliche 7 Stacks (yarn, pnpm, pyproject, requirements,
+  Cargo, go.mod, Makefile, docker-compose) kommen in C2.3.
+- `whatsbot/ports/git_clone.py`: `GitClone` Protocol mit
+  `clone(url, dest, depth=50, timeout_seconds=180.0)`. `GitCloneError`
+  für alle Failure-Modes (timeout / non-zero exit / git missing).
+- `whatsbot/adapters/subprocess_git_clone.py`: echte
+  `subprocess.run(["git", "clone", "--depth", "<n>", "--quiet", url, dest])`
+  Implementation. stderr-Tail (500 chars) im Error-Output. Konstruierbar
+  mit alternativem `git_binary` für Tests.
+- `whatsbot/application/post_clone.py`: 4 reine Schreib-Funktionen für
+  Post-Clone-Scaffolding (`.claudeignore` mit Spec-§12-Layer-5 Patterns,
+  `.whatsbot/config.json`, `CLAUDE.md` Template **nur wenn upstream-Repo
+  keines mitbringt**, `.whatsbot/suggested-rules.json` aus
+  `DetectionResult` wenn Rules vorhanden).
+- `whatsbot/application/project_service.py`: neuer Use-Case
+  `create_from_git(name, url) -> GitCreationOutcome`. Ablauf: validate
+  name + URL → reserve path → `git clone` → post-clone files → smart
+  detect → write suggested-rules → INSERT row. Cleanup via
+  `shutil.rmtree(ignore_errors=True)` bei jedem Fehler ab Schritt 3.
+- `whatsbot/application/command_handler.py`: `/new <name> git <url>` ist
+  jetzt aktiv (statt C2.2-Hint). Reply enthält Anzahl Rule-Vorschläge +
+  Hinweis auf `/allow batch approve` (kommt in C2.4).
+- `whatsbot/main.py`: zusätzliche DI-Parameter `git_clone` und
+  `projects_root` für Tests; default ist `SubprocessGitClone()` und
+  `~/projekte/`.
+- Tests (59 neu, 260 total): `test_git_url` (15 — happy/disallowed,
+  shell-injection-Versuche, Hostnamen-Subtilitäten wie github.io vs
+  github.com), `test_smart_detection` (7), `test_post_clone` (10),
+  `test_subprocess_git_clone` (6 — fake-git Skript via PATH-Override:
+  exit-zero Pfad, --depth/--quiet Args, non-zero-exit, stderr-Tail,
+  git-binary-missing, timeout). Erweiterte `test_command_handler` mit
+  einem `StubGitClone`, der die `octocat/Hello-World`-ähnliche Layout
+  schreibt (4 neue Tests für `/new git`).
+  **Coverage 95.09%**, mypy strict + ruff clean.
+- **Live-Smoke** mit echtem Git-Clone:
+  - `/new badurl git https://evil.example.com/x/y` → 🚫 URL nicht erlaubt
+  - `/new hello git https://github.com/octocat/Hello-World` → ✅ geklont
+    + 7 Rule-Vorschläge aus `.git` (Hello-World hat keine package.json)
+  - `/ls` zeigt `hello (git)` mit 🟢 NORMAL emoji
+  - Filesystem: vollständiges `.git/` aus dem Clone, plus
+    `.claudeignore`, `.whatsbot/config.json`, `.whatsbot/outputs/`,
+    `.whatsbot/suggested-rules.json` (7 git-Rules), `CLAUDE.md` Template
+    (Hello-World hat keine eigene)
+  - Duplicate-Detection greift bei zweitem `/new hello git ...`
+
 #### C2.1 — `/new <name>` + `/ls` (empty projects) ✅
 - `whatsbot/domain/projects.py`: `Project` dataclass mirrors the spec-§19
   ``projects`` row, `Mode`/`SourceMode` StrEnums, `validate_project_name`

@@ -22,6 +22,7 @@ from whatsbot.application.project_service import (
 )
 from whatsbot.domain import commands
 from whatsbot.domain.commands import CommandResult, StatusSnapshot
+from whatsbot.domain.git_url import DisallowedGitUrlError
 from whatsbot.domain.projects import (
     InvalidProjectNameError,
     format_listing,
@@ -73,22 +74,19 @@ class CommandHandler:
     # ---- /new <name> ------------------------------------------------------
 
     def _handle_new(self, args: str) -> CommandResult:
-        # Phase 2.1 only supports the empty-project shape. `/new <name> git
-        # <url>` is rejected here with a clear "kommt in C2.2" hint so users
-        # don't think it silently failed.
         parts = args.split()
-        if len(parts) >= 2 and parts[1] == "git":
-            return CommandResult(
-                reply=(
-                    "git-Klon wird in C2.2 verdrahtet. "
-                    "Aktuell verfügbar: /new <name> für ein leeres Projekt."
-                ),
-                command="/new git",
-            )
+
+        # /new <name> git <url>
+        if len(parts) == 3 and parts[1] == "git":
+            return self._handle_new_git(name=parts[0], url=parts[2])
+
         if len(parts) != 1:
             return CommandResult(
                 reply=(
-                    "Verwendung: /new <name>\n  Name: 2-32 Zeichen, klein, '_' oder '-' erlaubt"
+                    "Verwendung:\n"
+                    "  /new <name>            — leeres Projekt\n"
+                    "  /new <name> git <url>  — Git-Klon\n"
+                    "Name: 2-32 Zeichen, klein, '_' oder '-' erlaubt."
                 ),
                 command="/new",
             )
@@ -108,6 +106,42 @@ class CommandHandler:
                 f"({project.source_mode.value} · {project.mode.value})"
             ),
             command="/new",
+        )
+
+    def _handle_new_git(self, *, name: str, url: str) -> CommandResult:
+        try:
+            outcome = self._projects.create_from_git(name, url)
+        except InvalidProjectNameError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/new git")
+        except DisallowedGitUrlError as exc:
+            return CommandResult(reply=f"🚫 {exc}", command="/new git")
+        except ProjectAlreadyExistsError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/new git")
+        except ProjectFilesystemError as exc:
+            self._log.error(
+                "project_create_git_failed",
+                name=name,
+                url=url,
+                error=str(exc),
+            )
+            return CommandResult(reply=f"⚠️ {exc}", command="/new git")
+
+        suggestions = len(outcome.detection.suggested_rules)
+        artefacts = ", ".join(outcome.detection.artifacts_found) or "keine bekannten"
+        suffix = (
+            f"\n💡 {suggestions} Rule-Vorschläge aus {artefacts}.\n"
+            f"   /allow batch approve  — alle übernehmen (kommt in C2.4)\n"
+            f"   /allow batch review   — einzeln anschauen"
+            if suggestions
+            else f"\n(keine Allow-Rule-Vorschläge — Artefakte: {artefacts})"
+        )
+        return CommandResult(
+            reply=(
+                f"✅ Projekt '{outcome.project.name}' geklont "
+                f"({outcome.project.mode.value})"
+                f"{suffix}"
+            ),
+            command="/new git",
         )
 
     # ---- /ls --------------------------------------------------------------
