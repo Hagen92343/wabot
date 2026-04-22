@@ -1,0 +1,10 @@
+{
+  "_pattern": "docker system prune*",
+  "_note": "Matches Spec \u00a712 deny-pattern 'docker system prune*'. Pipe to hooks/pre_tool.py for a manual repro of a full deny round-trip.",
+  "tool": "Bash",
+  "tool_input": {
+    "command": "docker system prune -af"
+  },
+  "session_id": "smoke-c32",
+  "cwd": "/Users/hagenmarggraf/projekte/smoke"
+}

@@ -1,0 +1,10 @@
+{
+  "_pattern": "zsh /tmp/*",
+  "_note": "Matches Spec \u00a712 deny-pattern 'zsh /tmp/*'. Pipe to hooks/pre_tool.py for a manual repro of a full deny round-trip.",
+  "tool": "Bash",
+  "tool_input": {
+    "command": "zsh /tmp/install.sh"
+  },
+  "session_id": "smoke-c32",
+  "cwd": "/Users/hagenmarggraf/projekte/smoke"
+}

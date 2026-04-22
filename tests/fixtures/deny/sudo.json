@@ -1,0 +1,10 @@
+{
+  "_pattern": "sudo *",
+  "_note": "Matches Spec \u00a712 deny-pattern 'sudo *'. Pipe to hooks/pre_tool.py for a manual repro of a full deny round-trip.",
+  "tool": "Bash",
+  "tool_input": {
+    "command": "sudo apt install curl"
+  },
+  "session_id": "smoke-c32",
+  "cwd": "/Users/hagenmarggraf/projekte/smoke"
+}

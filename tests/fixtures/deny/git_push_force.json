@@ -1,0 +1,10 @@
+{
+  "_pattern": "git push --force*",
+  "_note": "Matches Spec \u00a712 deny-pattern 'git push --force*'. Pipe to hooks/pre_tool.py for a manual repro of a full deny round-trip.",
+  "tool": "Bash",
+  "tool_input": {
+    "command": "git push --force origin main"
+  },
+  "session_id": "smoke-c32",
+  "cwd": "/Users/hagenmarggraf/projekte/smoke"
+}

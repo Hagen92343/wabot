@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.application.hook_service import HookService
 from whatsbot.domain.allow_rules import AllowRulePattern, AllowRuleSource
 from whatsbot.domain.hook_decisions import HookDecision, Verdict, allow, deny
@@ -27,6 +28,12 @@ pytestmark = pytest.mark.unit
 
 
 class _StubProjectRepo:
+    """Implements the ProjectRepository Protocol for hook-service tests.
+
+    Only ``get`` is exercised here; the remaining methods satisfy the
+    Protocol so ``mypy --strict`` accepts this stub as a substitute.
+    """
+
     def __init__(self, projects: dict[str, Project]) -> None:
         self._projects = projects
 
@@ -36,17 +43,57 @@ class _StubProjectRepo:
         except KeyError as exc:
             raise ProjectNotFoundError(f"unknown project: {name}") from exc
 
+    def list_all(self) -> list[Project]:
+        return list(self._projects.values())
+
+    def create(self, project: Project) -> None:  # pragma: no cover
+        self._projects[project.name] = project
+
+    def delete(self, name: str) -> None:  # pragma: no cover
+        if name not in self._projects:
+            raise ProjectNotFoundError(name)
+        del self._projects[name]
+
+    def exists(self, name: str) -> bool:  # pragma: no cover
+        return name in self._projects
+
 
 class _StubAllowRuleRepo:
+    """Implements the AllowRuleRepository Protocol for hook-service tests."""
+
     def __init__(self, rules: dict[str, list[StoredAllowRule]]) -> None:
         self._rules = rules
 
     def list_for_project(self, project_name: str) -> list[StoredAllowRule]:
         return list(self._rules.get(project_name, ()))
 
+    def add(  # pragma: no cover
+        self,
+        project_name: str,
+        pattern: AllowRulePattern,
+        source: AllowRuleSource,
+    ) -> StoredAllowRule:
+        rule = _rule(project_name, pattern.tool, pattern.pattern, rule_id=999)
+        self._rules.setdefault(project_name, []).append(rule)
+        return rule
 
-class _SpyCoordinator:
-    """Records ask_bash calls and returns a predetermined decision."""
+    def remove(  # pragma: no cover
+        self, project_name: str, pattern: AllowRulePattern
+    ) -> bool:
+        existing = self._rules.get(project_name, [])
+        kept = [r for r in existing if r.pattern != pattern]
+        removed = len(kept) != len(existing)
+        self._rules[project_name] = kept
+        return removed
+
+
+class _SpyCoordinator(ConfirmationCoordinator):
+    """Records ask_bash calls and returns a predetermined decision.
+
+    Subclasses ConfirmationCoordinator so the HookService constructor
+    accepts it under mypy-strict — but all the real machinery is
+    overridden, so no actual Futures / DB / sender interaction happens.
+    """
 
     def __init__(self, *, decision: HookDecision) -> None:
         self._decision = decision
