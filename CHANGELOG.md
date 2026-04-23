@@ -5,7 +5,69 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
-### Phase 7 — Medien-Pipeline (in progress)
+### Phase 7 — Medien-Pipeline ✅ (complete)
+
+Alle 5 Checkpoints grün. End-to-End-Medien-Pipeline steht: Bilder,
+PDFs, Voice-Messages vom Handy fließen durch Meta Graph → Validation
+→ Cache → (ffmpeg + whisper für Voice) → `SessionService.send_prompt`
+→ tmux → Claude. Unsupportete Kinds (Video/Location/Sticker/Contact)
+bekommen freundliche Reject-Replies. Der Cache wird von einem
+async Sweeper unter Spec §16 Retention-Policy gehalten (7 Tage TTL,
+1 GB Size-Cap, secure-delete mit Zero-Overwrite).
+
+- ✅ C7.1 — Image-Pipeline + Reject-Pfade
+- ✅ C7.2 — PDF-Pipeline
+- ✅ C7.3 — Audio-Pipeline (Download + ffmpeg)
+- ✅ C7.4 — Whisper-Transkription + Audio-Send
+- ✅ C7.5 — Cache-Sweeper
+
+**Tests**: 1330/1330 passing + 1 skipped (ffmpeg-real), +226 von
+Phase-6-Baseline. mypy --strict clean auf 107 source files.
+
+#### C7.5 — Cache-Sweeper ✅
+
+Der Media-Cache wird jetzt automatisch unter Spec §16 Retention-
+Policy gehalten: alle 10 Minuten läuft ein async Sweeper, der erst
+TTL-abgelaufene Items (>7 Tage) entfernt, dann bei Gesamtcache
+>1 GB oldest-first weitere Items bis unter Cap evictet. Pattern
+identisch zum Phase-6-HeartbeatPumper (async Task + idempotent
+start/stop + asyncio.to_thread für Disk-IO).
+
+- **Domain (pure)**: `domain/media_cache.py` —
+  `CACHE_TTL_SECONDS = 7*86400`, `CACHE_MAX_BYTES = 1 GiB`,
+  `is_expired(item, now, ttl)` (>=-boundary verhindert Flicker
+  zwischen Sweeps), `select_expired` + `select_for_eviction`
+  (oldest-first, respektiert vom Caller gelieferte
+  `current_size`-Summe).
+- **Application**: `application/media_sweeper.py` — asyncio-Loop
+  mit `DEFAULT_SWEEP_INTERVAL_SECONDS = 600`, idempotente
+  start/stop, `sweep_now` für On-Demand-Aufrufe, `SweepReport`-
+  Dataclass mit ttl_deleted / size_deleted / bytes_freed. Jede
+  Exception (list_failure, delete_failure) wird log-only; der
+  Sweeper kann nie am Disk-Problem sterben, nur ticken.
+- **Wiring**: `main.py` baut `cache_impl` jetzt unconditional
+  (auch ohne MediaService — Sweeper kümmert sich um stale Files
+  aus vorherigen Prod-Läufen). Sweeper läuft als zweiter
+  FastAPI-Lifespan-Task neben HeartbeatPumper. Default ON in
+  prod/dev, `enable_media_sweeper=True` opt-in in TEST damit
+  bestehende Test-Suites nicht plötzlich einen Background-Loop
+  bekommen.
+- **Tests**: 14 unit für Domain (`test_media_cache_domain.py`:
+  is_expired-Edges + Boundary, select_expired happy + empty +
+  all-fresh, select_for_eviction empty + under-cap + exact-cap +
+  oldest-first + single-large-item + stops-at-cap +
+  caller-supplied current_size). 12 unit für Sweeper
+  (`test_media_sweeper.py`: TTL-only, size-only, combined,
+  no-op, list-failure Containment, delete-failure Containment,
+  initial sweep in start(), start/stop Idempotenz, periodic
+  loop fires). 3 integration
+  (`test_media_sweeper_lifespan.py`: echter FileMediaCache +
+  FastAPI-Lifespan räumt stale Files bei startup, Sweeper ist
+  disabled-by-default in TEST, secure_delete zeros-vor-unlink
+  als Regression-Check).
+
+**Tests**: 1330/1330 passing (+29 vs. C7.4), mypy --strict
+clean, ruff clean.
 
 #### C7.4 — Whisper-Transkription + Audio-Send ✅
 

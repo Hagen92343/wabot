@@ -1,45 +1,67 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 7 — Medien-Pipeline
-**Aktiver Checkpoint**: **C7.5** — Cache-Sweeper (TTL 7 Tage + 1 GB Cap)
-**Letzter abgeschlossener Checkpoint**: **C7.4** — Whisper-Transkription
-+ Audio-Send (End-to-End)
-**User-Freigabe für Phase 7**: ✅ erteilt
+**Aktive Phase**: Phase 7 — Medien-Pipeline ✅ (inhaltlich komplett,
+wartet auf User-Freigabe für Phase 8)
+**Aktiver Checkpoint**: — (Phase 7 geschlossen)
+**Letzter abgeschlossener Checkpoint**: **C7.5** — Cache-Sweeper
 
-## Wie ich in der nächsten Session weitermache
+## Was End-to-End vom Handy aus funktioniert (Stand nach Phase 7)
 
-1. **Diese Datei lesen** — du bist hier.
-2. **`.claude/rules/phase-7.md` lesen** — Plan-Doc, vom User
-   approved. Dort stehen die 5 Checkpoints + Architektur.
-3. `git log --oneline -30` für den Commit-Stand seit Phase 4 close.
-4. Baseline-Tests grün stellen:
-   ```bash
-   venv/bin/pytest tests/unit/ tests/integration/ \
-     --ignore=tests/unit/test_hook_common.py \
-     --ignore=tests/integration/test_hook_script.py \
-     --ignore=tests/integration/test_hook_fail_closed.py
-   ```
-   Erwartung: **1301/1301 grün** (+ 1 skipped wenn ffmpeg fehlt),
-   mypy --strict clean (105 source files), ruff clean (bis auf
-   pre-existing E731 in `delete_service.py`).
-5. Mit **C7.5** anfangen — siehe `phase-7.md` Sektion „C7.5".
-   Für Cache-Sweeper kommt neu dazu:
-   - `domain/media_cache.py` — pure Konstanten
-     `CACHE_TTL_SECONDS = 7*86400`, `CACHE_MAX_BYTES = 1 GB`,
-     `is_expired(item, now, ttl)`, `select_for_eviction(items,
-     current_size, max_size)` — oldest-first.
-   - `application/media_sweeper.py` — async Loop analog zum
-     `HeartbeatPumper`: alle ~10 Min TTL-Sweep + Size-Cap-Sweep
-     gegen `MediaCache.list_all()` + `MediaCache.secure_delete`.
-     Failure-containment via Log-Only.
-   - `main.py` — MediaSweeper als FastAPI-Lifespan-Task,
-     `enable_media_sweeper`-Param (default ON in prod/dev,
-     opt-in in TEST).
-   - Tests: 5 unit für `select_for_eviction` (oldest-first,
-     under-cap no-op, empty list), 4 unit für `MediaSweeper`
-     (TTL-only, size-only, beide, failure-containment), 2
-     integration (real `secure_delete` schreibt Nullen + unlinkt,
-     Sweeper läuft im TestClient-Lifespan).
+Alle Nachrichtentypen laufen durch. Images + PDFs + Voice-Messages
+fließen von WhatsApp durchs Meta-Webhook, durch Validation
+(MIME + Size + Magic-Bytes), in den Cache, und — für Voice —
+durch ffmpeg + whisper-cli → Text → SessionService.send_prompt →
+tmux → Claude. User bekommt bei Voice-Messages sofort einen
+"🎙 Transkribiere…"-Ack vor der Transkriptions-Latenz.
+Unsupported Kinds (Video/Location/Sticker/Contact) bekommen
+freundliche Reject-Replies. Cache-Sweeper räumt 7-Tage-alte
+Dateien und hält Gesamt-Cache unter 1 GB mit secure-delete.
+
+## Wie ich für Phase 8 wiedereinsteige
+
+1. Diese Datei lesen.
+2. `phases-3-to-9.md` Phase-8-Stub als Startpunkt
+   (Observability + Max-Limit-Handling: /log, /errors, /ps,
+   /metrics, /status, Circuit-Breaker für externe Adapter,
+   max_limits-Tabelle füllen + auswerten).
+3. **Vor dem Bauen**: `.claude/rules/phase-8.md` schreiben
+   (gleiche Struktur wie phase-7.md), User reviewen lassen,
+   *dann* erst implementieren.
+4. `git log --oneline -32` für den Commit-Stand bis
+   Phase-7-Close.
+5. `venv/bin/pytest tests/unit/ tests/integration/
+   --ignore=tests/unit/test_hook_common.py
+   --ignore=tests/integration/test_hook_script.py
+   --ignore=tests/integration/test_hook_fail_closed.py`
+   sollte **1330/1330 grün** (+ 1 skipped wenn ffmpeg fehlt)
+   zeigen. mypy --strict clean auf 107 source files. ruff
+   clean (bis auf pre-existing E731 in
+   `delete_service.py`).
+6. Phase-8-Scope aus `SPEC.md` §21 Phase 8 + §14 (Max-Limit)
+   + §15 (Observability):
+   - `domain/limits.py` — pure Parser für Transcript-Error-Events
+     (`usage_limit_reached`) als primäre Quelle + Status-Line
+     Regex als Fallback.
+   - `application/limit_service.py` — persistiert `max_limits`-
+     Rows, triggert proaktive Warnung bei <10% remaining,
+     auto-switch Opus → Sonnet bei Opus-Sub-Limit.
+   - `/log <msg_id>`, `/errors`, `/ps`, `/metrics`,
+     `/status` Commands ausbauen (Phase-1-Stubs sind da).
+   - Prometheus-Text-Format Exposition auf `/metrics` —
+     **nur localhost**, nicht über Tunnel erreichbar.
+   - Circuit-Breaker-Decorator für alle externen Adapters
+     (Meta-API, Whisper, Hook-IPC): 5 Fehler in 60s → 5min
+     Pause → Half-Open-Test.
+
+## Pre-existing Schuld (nicht-blockierend für Phase 8)
+
+`claude_sessions.session_id TEXT UNIQUE` kollidiert wenn zwei
+frische Sessions beide leeren session_id haben. Fix gehört in
+einen Phase-4-Cleanup-Commit (NULL statt empty oder UNIQUE drop).
+
+`whatsbot/application/delete_service.py:48` — E731
+(lambda-Assignment für `_DEFAULT_CLOCK`). Phase-2-Erbe;
+trivialer `def`-Rewrite, aber außerhalb Phase-7-Scope.
 
 ## Pre-existing Schuld (nicht-blockierend für Phase 7)
 

@@ -75,6 +75,7 @@ from whatsbot.application.kill_service import KillService
 from whatsbot.application.lock_service import LockService
 from whatsbot.application.lockdown_service import LockdownService
 from whatsbot.application.media_service import MediaService
+from whatsbot.application.media_sweeper import MediaSweeper
 from whatsbot.application.mode_service import ModeService
 from whatsbot.application.output_service import OutputService
 from whatsbot.application.panic_service import PanicService
@@ -131,6 +132,7 @@ def create_app(
     media_cache: MediaCache | None = None,
     audio_converter: AudioConverter | None = None,
     audio_transcriber: AudioTranscriber | None = None,
+    enable_media_sweeper: bool | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -420,6 +422,17 @@ def create_app(
         secrets=secrets_for_router,
     )
 
+    # Phase 7 C7.1 — on-disk media cache. Built unconditionally (it's
+    # a bare path + factory method, zero I/O until store() is called)
+    # so the C7.5 MediaSweeper can run even when MediaService itself
+    # is stubbed out (no tmux / no access token). In tests that
+    # inject a custom media_cache, we honour it.
+    cache_impl: MediaCache = (
+        media_cache
+        if media_cache is not None
+        else FileMediaCache(cache_dir=settings.media_cache_dir)
+    )
+
     # Phase 7 C7.1 — MediaService handles image/pdf/audio inbound
     # messages. Needs SessionService to forward Claude prompts, so it
     # is only built when Claude is actually launchable (tmux present).
@@ -445,11 +458,6 @@ def create_app(
                 downloader_impl = MetaMediaDownloader(access_token=access_token)
             else:
                 downloader_impl = None
-        cache_impl: MediaCache = (
-            media_cache
-            if media_cache is not None
-            else FileMediaCache(cache_dir=settings.media_cache_dir)
-        )
         # Phase 7 C7.3 — audio converter wired by default in
         # prod/dev; tests inject a FakeAudioConverter when they
         # exercise process_audio_to_wav. No wiring happens in TEST
@@ -525,13 +533,31 @@ def create_app(
         )
         pumper = HeartbeatPumper(writer=writer)
 
+    # Phase 7 C7.5 — MediaSweeper. Auto-on in prod/dev, opt-in via
+    # ``enable_media_sweeper=True`` in tests. Reuses the same
+    # cache_impl that MediaService writes into so TTL + size-cap
+    # enforcement works end-to-end with no extra injection at
+    # the call site.
+    sweeper: MediaSweeper | None = None
+    should_sweep = (
+        enable_media_sweeper
+        if enable_media_sweeper is not None
+        else settings.env is not Environment.TEST
+    )
+    if should_sweep:
+        sweeper = MediaSweeper(cache=cache_impl)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if pumper is not None:
             await pumper.start()
+        if sweeper is not None:
+            await sweeper.start()
         try:
             yield
         finally:
+            if sweeper is not None:
+                await sweeper.stop()
             if pumper is not None:
                 await pumper.stop()
 
@@ -568,6 +594,7 @@ def create_app(
     # the webhook flow (e.g. stop_transcript_watch on teardown).
     app.state.session_service = session_service
     app.state.media_service = media_service
+    app.state.media_sweeper = sweeper
 
     # Phase 4 C4.6 + C4.7 — StartupRecovery coerces YOLO → Normal
     # (Spec §6 invariant) and calls ensure_started for every row in
