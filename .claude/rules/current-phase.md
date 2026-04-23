@@ -1,57 +1,59 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 7 — Medien-Pipeline ✅ (inhaltlich komplett,
-wartet auf User-Freigabe für Phase 8)
-**Aktiver Checkpoint**: — (Phase 7 geschlossen)
-**Letzter abgeschlossener Checkpoint**: **C7.5** — Cache-Sweeper
+**Aktive Phase**: Phase 8 — Observability + Limits
+**Aktiver Checkpoint**: **C8.2** — /log + /errors + /ps + /update
+**Letzter abgeschlossener Checkpoint**: **C8.1** — Max-Limit-Persistenz
++ 10%-Warnung + Send-Prompt-Guard
+**User-Freigabe für Phase 8**: ✅ erteilt
 
-## Was End-to-End vom Handy aus funktioniert (Stand nach Phase 7)
-
-Alle Nachrichtentypen laufen durch. Images + PDFs + Voice-Messages
-fließen von WhatsApp durchs Meta-Webhook, durch Validation
-(MIME + Size + Magic-Bytes), in den Cache, und — für Voice —
-durch ffmpeg + whisper-cli → Text → SessionService.send_prompt →
-tmux → Claude. User bekommt bei Voice-Messages sofort einen
-"🎙 Transkribiere…"-Ack vor der Transkriptions-Latenz.
-Unsupported Kinds (Video/Location/Sticker/Contact) bekommen
-freundliche Reject-Replies. Cache-Sweeper räumt 7-Tage-alte
-Dateien und hält Gesamt-Cache unter 1 GB mit secure-delete.
-
-## Wie ich für Phase 8 wiedereinsteige
+## Wie ich in der nächsten Session weitermache
 
 1. Diese Datei lesen.
-2. `phases-3-to-9.md` Phase-8-Stub als Startpunkt
-   (Observability + Max-Limit-Handling: /log, /errors, /ps,
-   /metrics, /status, Circuit-Breaker für externe Adapter,
-   max_limits-Tabelle füllen + auswerten).
-3. **Vor dem Bauen**: `.claude/rules/phase-8.md` schreiben
-   (gleiche Struktur wie phase-7.md), User reviewen lassen,
-   *dann* erst implementieren.
-4. `git log --oneline -32` für den Commit-Stand bis
-   Phase-7-Close.
-5. `venv/bin/pytest tests/unit/ tests/integration/
+2. `.claude/rules/phase-8.md` lesen — 4 Checkpoints + Architektur.
+3. `git log --oneline -34` für den Commit-Stand bis C8.1-Close.
+4. `venv/bin/pytest tests/unit/ tests/integration/
    --ignore=tests/unit/test_hook_common.py
    --ignore=tests/integration/test_hook_script.py
    --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte **1330/1330 grün** (+ 1 skipped wenn ffmpeg fehlt)
-   zeigen. mypy --strict clean auf 107 source files. ruff
-   clean (bis auf pre-existing E731 in
-   `delete_service.py`).
-6. Phase-8-Scope aus `SPEC.md` §21 Phase 8 + §14 (Max-Limit)
-   + §15 (Observability):
-   - `domain/limits.py` — pure Parser für Transcript-Error-Events
-     (`usage_limit_reached`) als primäre Quelle + Status-Line
-     Regex als Fallback.
-   - `application/limit_service.py` — persistiert `max_limits`-
-     Rows, triggert proaktive Warnung bei <10% remaining,
-     auto-switch Opus → Sonnet bei Opus-Sub-Limit.
-   - `/log <msg_id>`, `/errors`, `/ps`, `/metrics`,
-     `/status` Commands ausbauen (Phase-1-Stubs sind da).
-   - Prometheus-Text-Format Exposition auf `/metrics` —
-     **nur localhost**, nicht über Tunnel erreichbar.
-   - Circuit-Breaker-Decorator für alle externen Adapters
-     (Meta-API, Whisper, Hook-IPC): 5 Fehler in 60s → 5min
-     Pause → Half-Open-Test.
+   sollte **1392/1392 grün** (+ 1 skipped wenn ffmpeg fehlt)
+   zeigen. mypy --strict clean auf 112 source files. ruff
+   clean (bis auf pre-existing E731 in `delete_service.py`).
+5. Mit **C8.2** anfangen — siehe `.claude/rules/phase-8.md`
+   Sektion „C8.2":
+   - `application/diagnostics_service.py` — tail't die JSONL-
+     Logs aus `settings.log_dir`, filtert auf `wa_msg_id` /
+     Level. `recent_errors(n)`, `read_trace(msg_id)`,
+     `active_sessions()`.
+   - CommandHandler-Routes für `/log <msg_id>` (ohne Args →
+     hint), `/errors`, `/ps`, `/update`.
+   - `/log`-Output läuft durch die OutputService-Size-Pipeline
+     wenn er >10KB wird (C3.5-Pattern wiederverwenden).
+   - Tests: 4+ unit für DiagnosticsService (tail-logik,
+     msg_id-filter, non-JSON-lines robust, leeres Log-Dir → []).
+     1 integration via /webhook mit fixture-JSONL in tmp_path.
+
+## C8.1 liefert (Live-Verhalten)
+
+- `UsageLimitEvent` im Transcript → persistiert in
+  `max_limits` mit `reset_at_ts`, preserviert `warned_at_ts`
+  über Re-Emits.
+- `/p <name> <prompt>` während aktives Fenster →
+  `⏸ Max-Limit erreicht [session_5h] · Reset in 3h 22m`
+  (kein tmux-Spin-up, kein send_keys, kein 📨-ack).
+- `MaxLimitSweeper` tickt 60s, feuert WhatsApp-Warnung bei
+  <10% Remaining einmal pro Window, prunt expired Rows.
+- Lifespan-opt-in via `enable_media_sweeper`-Parallel-Pattern
+  (sweeper auto-off in TEST, auto-on in prod/dev).
+
+## Pre-existing Schuld (nicht-blockierend für Phase 8)
+
+`claude_sessions.session_id TEXT UNIQUE` kollidiert wenn zwei
+frische Sessions beide leeren session_id haben. Fix gehört in
+einen Phase-4-Cleanup-Commit (NULL statt empty oder UNIQUE drop).
+
+`whatsbot/application/delete_service.py:48` — E731
+(lambda-Assignment für `_DEFAULT_CLOCK`). Phase-2-Erbe;
+trivialer `def`-Rewrite, aber außerhalb Scope.
 
 ## Pre-existing Schuld (nicht-blockierend für Phase 8)
 

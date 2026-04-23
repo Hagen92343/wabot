@@ -37,6 +37,9 @@ from whatsbot.adapters.sqlite_app_state_repository import (
 from whatsbot.adapters.sqlite_claude_session_repository import (
     SqliteClaudeSessionRepository,
 )
+from whatsbot.adapters.sqlite_max_limits_repository import (
+    SqliteMaxLimitsRepository,
+)
 from whatsbot.adapters.sqlite_mode_event_repository import (
     SqliteModeEventRepository,
 )
@@ -72,8 +75,10 @@ from whatsbot.application.force_service import ForceService
 from whatsbot.application.heartbeat_pumper import HeartbeatPumper
 from whatsbot.application.hook_service import HookService
 from whatsbot.application.kill_service import KillService
+from whatsbot.application.limit_service import LimitService
 from whatsbot.application.lock_service import LockService
 from whatsbot.application.lockdown_service import LockdownService
+from whatsbot.application.max_limit_sweeper import MaxLimitSweeper
 from whatsbot.application.media_service import MediaService
 from whatsbot.application.media_sweeper import MediaSweeper
 from whatsbot.application.mode_service import ModeService
@@ -217,6 +222,16 @@ def create_app(
         default_recipient=default_recipient,
     )
 
+    # Phase 8 C8.1 — LimitService persists Claude usage-limit events
+    # from the transcript and guards send_prompt against active
+    # reset windows. Built unconditionally; the cost is a single
+    # empty table read on startup.
+    limit_service = LimitService(
+        repo=SqliteMaxLimitsRepository(conn),
+        sender=sender,
+        default_recipient=default_recipient,
+    )
+
     # Output-size guard (Spec §10) — >10KB bodies get stashed under
     # ``<data-dir>/outputs/<msg_id>.md`` and the user sees a /send |
     # /discard | /save dialog instead.
@@ -312,11 +327,15 @@ def create_app(
                 if locks_ref is not None:
                     locks_ref.note_local_input(project)
 
+            # Phase 8 C8.1: feed usage-limit events from the
+            # transcript straight into LimitService so a hit
+            # persists and blocks subsequent prompts until reset.
             ingest = TranscriptIngest(
                 session_repo=session_repo_for_ingest,
                 on_turn_end=_deliver_turn_end,
                 on_auto_compact=_fire_compact,
                 on_local_input=_note_local_input,
+                on_usage_limit=limit_service.record,
             )
 
         session_kwargs: dict[str, object] = {
@@ -337,6 +356,7 @@ def create_app(
             session_kwargs["discovery_timeout_seconds"] = discovery_timeout_seconds
         if lock_service is not None:
             session_kwargs["lock_service"] = lock_service
+        session_kwargs["limit_service"] = limit_service
         session_service = SessionService(**session_kwargs)  # type: ignore[arg-type]
         # Resolve the forward ref used by the ingest's auto-compact
         # callback (constructed above before session_service existed).
@@ -547,15 +567,29 @@ def create_app(
     if should_sweep:
         sweeper = MediaSweeper(cache=cache_impl)
 
+    # Phase 8 C8.1 — MaxLimitSweeper ticks every 60 s to fire the
+    # proactive <10 % warning and prune expired rows. Same opt-in
+    # semantics as the other lifespan tasks: auto-on in prod/dev,
+    # opt-in in TEST so existing test suites don't grow background
+    # loops they didn't ask for.
+    limit_sweeper: MaxLimitSweeper | None = None
+    should_limit_sweep = settings.env is not Environment.TEST
+    if should_limit_sweep:
+        limit_sweeper = MaxLimitSweeper(limit_service=limit_service)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if pumper is not None:
             await pumper.start()
         if sweeper is not None:
             await sweeper.start()
+        if limit_sweeper is not None:
+            await limit_sweeper.start()
         try:
             yield
         finally:
+            if limit_sweeper is not None:
+                await limit_sweeper.stop()
             if sweeper is not None:
                 await sweeper.stop()
             if pumper is not None:
@@ -595,6 +629,8 @@ def create_app(
     app.state.session_service = session_service
     app.state.media_service = media_service
     app.state.media_sweeper = sweeper
+    app.state.limit_service = limit_service
+    app.state.max_limit_sweeper = limit_sweeper
 
     # Phase 4 C4.6 + C4.7 — StartupRecovery coerces YOLO → Normal
     # (Spec §6 invariant) and calls ensure_started for every row in

@@ -30,6 +30,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from whatsbot.application.limit_service import LimitService
 from whatsbot.application.lock_service import LockService
 from whatsbot.application.transcript_ingest import TranscriptIngest
 from whatsbot.domain.claude_paths import (
@@ -83,6 +84,7 @@ class SessionService:
         discovery_timeout_seconds: float = DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
         discovery_poll_seconds: float = DEFAULT_DISCOVERY_POLL_SECONDS,
         lock_service: LockService | None = None,
+        limit_service: LimitService | None = None,
     ) -> None:
         self._projects = project_repo
         self._sessions = session_repo
@@ -95,6 +97,7 @@ class SessionService:
         self._discovery_timeout_s = discovery_timeout_seconds
         self._discovery_poll_s = discovery_poll_seconds
         self._locks = lock_service
+        self._limits = limit_service
         # Tracks active transcript watches per project so ensure_started
         # is idempotent and we have a handle to pass to unwatch on
         # mode-recycle / shutdown.
@@ -259,8 +262,17 @@ class SessionService:
 
         Raises ``LocalTerminalHoldsLockError`` (from lock_service
         when wired, Spec §7) if the local terminal actively holds
-        the session.
+        the session. Raises ``MaxLimitActiveError`` (from
+        limit_service, Spec §14) if Claude hit a usage limit and
+        we're still inside the reset window — we abort *before*
+        ensure_started so a blocked prompt doesn't spin up tmux
+        for nothing.
         """
+        if self._limits is not None:
+            # MaxLimitActiveError propagates — the command layer
+            # catches it and renders the "⏸ Max-Limit" reply.
+            self._limits.check_guard(project_name)
+
         session = self.ensure_started(project_name)
 
         if self._locks is not None:

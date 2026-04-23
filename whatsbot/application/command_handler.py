@@ -30,6 +30,7 @@ from whatsbot.application.delete_service import (
 )
 from whatsbot.application.force_service import ForceService
 from whatsbot.application.kill_service import KillService
+from whatsbot.application.limit_service import MaxLimitActiveError
 from whatsbot.application.lock_service import (
     LocalTerminalHoldsLockError,
     LockService,
@@ -53,6 +54,7 @@ from whatsbot.domain.allow_rules import (
 )
 from whatsbot.domain.commands import CommandResult, StatusSnapshot
 from whatsbot.domain.git_url import DisallowedGitUrlError
+from whatsbot.domain.limits import format_reset_duration
 from whatsbot.domain.pending_deletes import CONFIRM_WINDOW_SECONDS
 from whatsbot.domain.projects import (
     InvalidProjectNameError,
@@ -425,6 +427,23 @@ class CommandHandler:
                     f"🔒 Terminal aktiv auf '{name}'. "
                     f"Benutze /force {name} <PIN> <prompt> zum "
                     "Uebernehmen oder /release zum Freigeben."
+                ),
+                command=command,
+            )
+        except MaxLimitActiveError as exc:
+            # Spec §14 — no queueing, hard-reject with the shortest
+            # active limit's countdown so the user knows when to
+            # retry.
+            import time
+
+            now = int(time.time())
+            reset_str = format_reset_duration(
+                exc.limit.reset_at_ts, now=now
+            )
+            return CommandResult(
+                reply=(
+                    f"⏸ Max-Limit erreicht [{exc.limit.kind.value}] · "
+                    f"Reset in {reset_str}"
                 ),
                 command=command,
             )

@@ -5,6 +5,71 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
+### Phase 8 — Observability + Limits (in progress)
+
+#### C8.1 — Max-Limit-Persistenz + 10%-Warnung ✅
+
+Die `max_limits`-Tabelle (Phase-1-Schema) wird endlich bespielt.
+Die `UsageLimitEvent`-Callback-Hookup aus Phase 4 fließt in einen
+neuen `LimitService`, der den Reset-Timer pro Kind hält,
+Prompts während aktiven Reset-Fenstern hart ablehnt (Spec §14
+"keine Queue") und bei <10% Remaining genau eine WhatsApp-
+Warnung pro Fenster feuert. Ein lightweight asyncio-Sweeper
+tickt minütlich für Warnungen + Aufräumen abgelaufener Rows.
+
+- **Domain (pure)**: `domain/limits.py` — `LimitKind` StrEnum
+  (session_5h / weekly / opus_sub, exakt wie §19-Schema),
+  `MaxLimit`-Dataclass (int-epoch-seconds statt datetime wegen
+  DB-Schema), `is_active`, `should_warn` (mit 48h-same-window-
+  Buffer), `shortest_active` (Spec §14 "kürzester Countdown"),
+  `format_reset_duration` (3h 22m / 42m / 15s / <1s),
+  `parse_reset_at` (robust ISO parser — int/float/str, Z/offset/
+  naive, rejects bool explicitly).
+- **Port + Adapter**: `MaxLimitsRepository` + SQLite-Adapter.
+  Standard CRUD plus `mark_warned` Partial-Update (warned_at_ts
+  only). Domain-Sentinel `-1.0` für "remaining unknown" wird
+  DB-seitig roundtripped.
+- **Application**: `LimitService.record(event)` mapped raw
+  limit_kind auf Enum (robust fallback auf SESSION_5H),
+  preserviert `warned_at_ts` + `remaining_pct` über re-emits
+  (Claude feuert den Event mehrfach pro Window), defaultet
+  auf 1h-window wenn `reset_at` fehlt.
+  `check_guard(project)` raise't `MaxLimitActiveError` mit
+  der shortest-active Row; wird von `SessionService.send_prompt`
+  *vor* ensure_started aufgerufen, damit ein blockierter Prompt
+  nicht unnötig tmux+Claude hochfährt.
+  `maybe_warn()` fires genau einmal pro Fenster (mark_warned),
+  failsafe: Sender-Failures resetten die Warn-Uhr nicht.
+  `sweep_expired()` prunt alte Rows (best-effort /status-hygiene).
+  `update_remaining(kind, pct)` für spätere C8.4-Metrics.
+- **Lifespan-Task**: `MaxLimitSweeper` (async, 60s-Tick, analog
+  HeartbeatPumper/MediaSweeper). Auto-on in prod/dev, opt-out
+  in TEST.
+- **CommandHandler**: `_dispatch_prompt` catcht
+  `MaxLimitActiveError` und rendert
+  `⏸ Max-Limit erreicht [session_5h] · Reset in 3h 22m`.
+- **Tests**: 28 unit für `domain/limits` (is_active/shortest
+  Edges, should_warn-Matrix inkl. same-window-floor, 8 Format-
+  Edges 0s→7d, parse_reset_at mit Z/offset/naive/fractional/
+  invalid/None/bool-reject). 10 unit für
+  `SqliteMaxLimitsRepository` (get-missing, upsert-roundtrip +
+  replace, mark_warned partial + noop-on-missing, delete
+  true/false, list_all order-by-reset, sentinel-roundtrip,
+  kind-CHECK-constraint-Regression). 22 unit für LimitService
+  (record mit und ohne reset_at, limit_kind-Mapping parametrisiert,
+  warned_at + remaining_pct-Preservation, check_guard passes/
+  raises/shortest/expired, maybe_warn once-per-window/above-
+  threshold-skip/no-recipient-noop/send-failure-retry-safe,
+  sweep_expired + empty, update_remaining clamp + missing).
+  2 e2e (`test_limit_guard_e2e.py`: real tmux + signed /webhook
+  mit preseeded active-limit → `⏸ Max-Limit` mit "3h 22m"-
+  Countdown reply, kein 📨-ack; expired-limit-row → normales
+  📨 reply).
+
+**Tests**: 1392/1392 passing + 1 skipped (ffmpeg-real), +62 vs.
+Phase-7-close. mypy --strict clean auf 112 source files,
+ruff clean (bis auf pre-existing E731 in `delete_service.py`).
+
 ### Phase 7 — Medien-Pipeline ✅ (complete)
 
 Alle 5 Checkpoints grün. End-to-End-Medien-Pipeline steht: Bilder,
