@@ -24,6 +24,7 @@ class FakeSessionRepo:
     """Records update_activity calls; other methods are not exercised."""
 
     activity_calls: list[tuple[str, int]] = field(default_factory=list)
+    mark_compact_calls: list[str] = field(default_factory=list)
     raise_on_update: Exception | None = None
 
     def upsert(self, session: Any) -> None:  # pragma: no cover
@@ -56,14 +57,16 @@ class FakeSessionRepo:
     def update_mode(self, project_name: str, mode: Mode) -> None:  # pragma: no cover
         pass
 
-    def mark_compact(self, project_name: str, at: datetime) -> None:  # pragma: no cover
-        pass
+    def mark_compact(self, project_name: str, at: datetime) -> None:
+        del at
+        self.mark_compact_calls.append(project_name)
 
 
 @dataclass
 class Recorder:
     turn_ends: list[tuple[str, str]] = field(default_factory=list)
     usage_limits: list[tuple[str, UsageLimitEvent]] = field(default_factory=list)
+    auto_compacts: list[str] = field(default_factory=list)
 
     def on_turn_end(self, project: str, text: str) -> None:
         self.turn_ends.append((project, text))
@@ -71,9 +74,15 @@ class Recorder:
     def on_usage_limit(self, project: str, event: UsageLimitEvent) -> None:
         self.usage_limits.append((project, event))
 
+    def on_auto_compact(self, project: str) -> None:
+        self.auto_compacts.append(project)
+
 
 def _ingest(
-    *, repo: FakeSessionRepo | None = None, with_limits: bool = False
+    *,
+    repo: FakeSessionRepo | None = None,
+    with_limits: bool = False,
+    with_compact: bool = False,
 ) -> tuple[TranscriptIngest, FakeSessionRepo, Recorder]:
     actual_repo = repo or FakeSessionRepo()
     recorder = Recorder()
@@ -81,6 +90,7 @@ def _ingest(
         session_repo=actual_repo,
         on_turn_end=recorder.on_turn_end,
         on_usage_limit=recorder.on_usage_limit if with_limits else None,
+        on_auto_compact=recorder.on_auto_compact if with_compact else None,
     )
     return ingest, actual_repo, recorder
 
@@ -334,3 +344,86 @@ def test_reset_on_unknown_project_is_noop() -> None:
     ingest, _, _ = _ingest()
     # Must not raise.
     ingest.reset("ghost")
+
+
+# ---- auto-compact (C4.8) -------------------------------------------
+
+
+# 200k context window * 0.80 = 160_000. We use 165_000 to cross it
+# comfortably without landing exactly on the threshold.
+_OVER_THRESHOLD_TOKENS = 165_000
+
+
+def test_auto_compact_fires_when_ratio_crosses_threshold() -> None:
+    ingest, repo, recorder = _ingest(with_compact=True)
+    ingest.feed(
+        "alpha",
+        _assistant("big response", tokens=_OVER_THRESHOLD_TOKENS),
+    )
+    assert recorder.auto_compacts == ["alpha"]
+    assert repo.mark_compact_calls == ["alpha"]
+
+
+def test_auto_compact_does_not_fire_below_threshold() -> None:
+    ingest, repo, recorder = _ingest(with_compact=True)
+    # 50% of 200k → no compact.
+    ingest.feed("alpha", _assistant("modest response", tokens=100_000))
+    assert recorder.auto_compacts == []
+    assert repo.mark_compact_calls == []
+
+
+def test_auto_compact_is_idempotent_until_tokens_climb_back() -> None:
+    """After compact, the token counters reset. A follow-up assistant
+    event with the same cumulative count would NOT re-fire because
+    the in-memory state + DB row both zero out. Only when Claude's
+    cumulative count climbs BACK past 80% does compact fire again."""
+    ingest, repo, recorder = _ingest(with_compact=True)
+    ingest.feed(
+        "alpha",
+        _assistant("first overshoot", tokens=_OVER_THRESHOLD_TOKENS),
+    )
+    # Second assistant event reports lower tokens (post-compact the
+    # cumulative count shrinks). No re-fire.
+    ingest.feed("alpha", _assistant("after compact", tokens=5_000))
+    assert recorder.auto_compacts == ["alpha"]
+    assert repo.mark_compact_calls == ["alpha"]
+
+
+def test_auto_compact_refires_after_token_counter_climbs_again() -> None:
+    ingest, repo, recorder = _ingest(with_compact=True)
+    # First overshoot → first compact.
+    ingest.feed(
+        "alpha",
+        _assistant("first", tokens=_OVER_THRESHOLD_TOKENS),
+    )
+    # Some quiet turns.
+    ingest.feed("alpha", _assistant("quiet", tokens=50_000))
+    # Now we climb back up past the threshold → second compact.
+    ingest.feed(
+        "alpha",
+        _assistant("second overshoot", tokens=_OVER_THRESHOLD_TOKENS),
+    )
+    assert recorder.auto_compacts == ["alpha", "alpha"]
+    assert repo.mark_compact_calls == ["alpha", "alpha"]
+
+
+def test_auto_compact_callback_not_configured_is_noop() -> None:
+    ingest, repo, recorder = _ingest(with_compact=False)
+    ingest.feed(
+        "alpha",
+        _assistant("big", tokens=_OVER_THRESHOLD_TOKENS),
+    )
+    assert recorder.auto_compacts == []
+    # With no callback, we also don't poke mark_compact — the whole
+    # auto-compact branch is inert.
+    assert repo.mark_compact_calls == []
+
+
+def test_auto_compact_only_fires_per_project() -> None:
+    ingest, _, recorder = _ingest(with_compact=True)
+    ingest.feed(
+        "alpha",
+        _assistant("a-overshoot", tokens=_OVER_THRESHOLD_TOKENS),
+    )
+    ingest.feed("beta", _assistant("b-modest", tokens=50_000))
+    assert recorder.auto_compacts == ["alpha"]

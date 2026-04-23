@@ -29,6 +29,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from whatsbot.domain.sessions import (
+    AUTO_COMPACT_THRESHOLD,
+    context_fill_ratio,
+)
 from whatsbot.domain.transcript import (
     AssistantEvent,
     UsageLimitEvent,
@@ -46,6 +50,11 @@ TurnEndCallback = Callable[[str, str], None]
 # scope: surface the event to the caller; the ``max_limits`` table
 # wiring lands in Phase 8.
 UsageLimitCallback = Callable[[str, UsageLimitEvent], None]
+
+# Callback fired when the context fill ratio crosses the auto-compact
+# threshold (Spec §8, C4.8). Argument is the project name; the
+# implementation sends ``/compact`` into the tmux pane.
+AutoCompactCallback = Callable[[str], None]
 
 
 @dataclass
@@ -83,10 +92,12 @@ class TranscriptIngest:
         session_repo: ClaudeSessionRepository,
         on_turn_end: TurnEndCallback,
         on_usage_limit: UsageLimitCallback | None = None,
+        on_auto_compact: AutoCompactCallback | None = None,
     ) -> None:
         self._sessions = session_repo
         self._on_turn_end = on_turn_end
         self._on_usage_limit = on_usage_limit
+        self._on_auto_compact = on_auto_compact
         self._states: dict[str, _IngestState] = {}
         self._lock = threading.Lock()
         self._log = get_logger("whatsbot.ingest")
@@ -179,6 +190,11 @@ class TranscriptIngest:
                 text_len=len(emit_text),
             )
             self._on_turn_end(project_name, emit_text)
+        # Auto-compact check runs AFTER turn-end delivery so the
+        # user sees the last pre-compact response before /compact
+        # kicks Claude into summary mode (Spec §8 + C4.8).
+        if tokens_to_persist is not None:
+            self._maybe_auto_compact(project_name, tokens_to_persist)
 
     def _handle_usage_limit(
         self, project_name: str, event: UsageLimitEvent
@@ -215,3 +231,46 @@ class TranscriptIngest:
             state = self._states.get(project_name)
             if state is not None:
                 state.last_tokens_persisted = tokens
+
+    def _maybe_auto_compact(self, project_name: str, tokens: int) -> None:
+        """Fire ``/compact`` when context fill crosses the threshold.
+
+        Idempotence against the same conversation reaching 80%+ on
+        multiple consecutive turns is enforced via the ``mark_compact``
+        persistence step: it resets ``tokens_used`` to 0 in the DB
+        AND we zero the in-memory counters too. The next assistant
+        event has to re-accumulate from 0 before it can re-trigger.
+        """
+        if self._on_auto_compact is None:
+            return
+        ratio = context_fill_ratio(tokens)
+        if ratio < AUTO_COMPACT_THRESHOLD:
+            return
+
+        self._log.info(
+            "auto_compact_triggered",
+            project=project_name,
+            tokens=tokens,
+            ratio=round(ratio, 3),
+        )
+        try:
+            self._on_auto_compact(project_name)
+        except Exception:  # pragma: no cover - logged
+            # Callback failure (tmux down, etc.) must not kill the
+            # observer thread — log and continue.
+            self._log.exception(
+                "auto_compact_callback_failed", project=project_name
+            )
+        try:
+            self._sessions.mark_compact(project_name, datetime.now(UTC))
+        except Exception:  # pragma: no cover - logged
+            self._log.exception(
+                "auto_compact_persist_failed", project=project_name
+            )
+        # Zero the in-memory counters so a later uptick has to climb
+        # back up to threshold before re-triggering.
+        with self._lock:
+            state = self._states.get(project_name)
+            if state is not None:
+                state.max_tokens_observed = 0
+                state.last_tokens_persisted = 0

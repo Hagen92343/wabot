@@ -186,6 +186,29 @@ class SessionService:
             return
         self._watcher.unwatch(handle)
 
+    def fire_auto_compact(self, project_name: str) -> None:
+        """Send ``/compact`` into the project's tmux pane.
+
+        Invoked by ``TranscriptIngest.on_auto_compact`` when the
+        context-fill ratio crosses Spec §8's 80% threshold. Claude
+        Code treats ``/compact`` as a meta-command that summarises
+        the conversation so far and resumes with the summary as the
+        new baseline, freeing context window. The ingest zeros its
+        own counters right after; we don't touch state here.
+        """
+        tmux_name = tmux_session_name(project_name)
+        if not self._tmux.has_session(tmux_name):
+            self._log.warning(
+                "auto_compact_skipped_no_tmux",
+                project=project_name,
+                tmux_session=tmux_name,
+            )
+            return
+        self._tmux.send_text(tmux_name, "/compact")
+        self._log.info(
+            "auto_compact_sent", project=project_name, tmux_session=tmux_name
+        )
+
     def recycle(self, project_name: str) -> ClaudeSession:
         """Kill the tmux session, then relaunch via ``ensure_started``.
 

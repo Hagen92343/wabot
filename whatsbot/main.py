@@ -231,9 +231,23 @@ def create_app(
                     return
                 output_service.deliver(to=default_recipient, body=text)
 
+            # C4.8 — when the transcript ingest detects 80% context
+            # fill, it needs to shell /compact into the tmux pane.
+            # SessionService owns the tmux handle, so the callback
+            # closes over it here and the ingest stays decoupled
+            # from tmux plumbing.
+            session_service_ref: list[SessionService | None] = [None]
+
+            def _fire_compact(project: str) -> None:
+                svc = session_service_ref[0]
+                if svc is None:
+                    return
+                svc.fire_auto_compact(project)
+
             ingest = TranscriptIngest(
                 session_repo=session_repo_for_ingest,
                 on_turn_end=_deliver_turn_end,
+                on_auto_compact=_fire_compact,
             )
 
         session_kwargs: dict[str, object] = {
@@ -253,6 +267,10 @@ def create_app(
         if discovery_timeout_seconds is not None:
             session_kwargs["discovery_timeout_seconds"] = discovery_timeout_seconds
         session_service = SessionService(**session_kwargs)  # type: ignore[arg-type]
+        # Resolve the forward ref used by the ingest's auto-compact
+        # callback (constructed above before session_service existed).
+        if ingest is not None:
+            session_service_ref[0] = session_service
 
     # ModeService is constructed only when we have a SessionService to
     # recycle; /mode without Claude running has no useful semantics.

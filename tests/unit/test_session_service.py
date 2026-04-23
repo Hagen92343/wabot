@@ -745,3 +745,33 @@ def test_service_without_watcher_or_ingest_skips_watching(
     svc.ensure_started("alpha")  # must not raise
     # Nothing crashes when we try to stop a non-existent watch.
     svc.stop_transcript_watch("alpha")
+
+
+# ---- fire_auto_compact (C4.8) -----------------------------------------
+
+
+def test_fire_auto_compact_sends_slash_command_to_tmux(
+    conn: sqlite3.Connection, projects_root: Path
+) -> None:
+    _seed_project(conn, "alpha", projects_root=projects_root)
+    tmux = FakeTmuxController()
+    tmux._alive.add("wb-alpha")  # pretend session is alive
+    svc = _build_service(conn, projects_root, tmux)
+
+    svc.fire_auto_compact("alpha")
+
+    assert tmux.send_text_calls == [("wb-alpha", "/compact")]
+
+
+def test_fire_auto_compact_noop_when_tmux_session_missing(
+    conn: sqlite3.Connection, projects_root: Path
+) -> None:
+    _seed_project(conn, "alpha", projects_root=projects_root)
+    tmux = FakeTmuxController()
+    # No session alive — fire_auto_compact should log + return
+    # rather than error.
+    svc = _build_service(conn, projects_root, tmux)
+
+    svc.fire_auto_compact("alpha")
+
+    assert tmux.send_text_calls == []
