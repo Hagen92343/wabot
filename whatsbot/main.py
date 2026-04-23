@@ -22,11 +22,11 @@ from fastapi.responses import PlainTextResponse
 import whatsbot
 from whatsbot.adapters.ffmpeg_audio_converter import FfmpegAudioConverter
 from whatsbot.adapters.file_heartbeat_writer import FileHeartbeatWriter
+from whatsbot.adapters.file_log_reader import FileLogReader
 from whatsbot.adapters.file_media_cache import FileMediaCache
 from whatsbot.adapters.keychain_provider import KeychainProvider
 from whatsbot.adapters.meta_media_downloader import MetaMediaDownloader
 from whatsbot.adapters.osascript_notifier import OsascriptNotifier
-from whatsbot.adapters.whisper_cpp_transcriber import WhisperCppTranscriber
 from whatsbot.adapters.redacting_sender import RedactingMessageSender
 from whatsbot.adapters.sqlite_allow_rule_repository import (
     SqliteAllowRuleRepository,
@@ -66,11 +66,13 @@ from whatsbot.adapters.watchdog_transcript_watcher import (
     WatchdogTranscriptWatcher,
 )
 from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
+from whatsbot.adapters.whisper_cpp_transcriber import WhisperCppTranscriber
 from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.allow_service import AllowService
 from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.application.delete_service import DeleteService
+from whatsbot.application.diagnostics_service import DiagnosticsService
 from whatsbot.application.force_service import ForceService
 from whatsbot.application.heartbeat_pumper import HeartbeatPumper
 from whatsbot.application.hook_service import HookService
@@ -518,6 +520,18 @@ def create_app(
                 audio_transcriber=audio_transcriber_impl,
             )
 
+    # Phase 8 C8.2 — DiagnosticsService wires /log /errors /ps /update.
+    # Uses the shared tmux/lock/claude-session handles so ``/ps`` shows
+    # what SessionService actually spawned, not a stale DB snapshot.
+    # Built unconditionally — the FileLogReader handles a missing or
+    # empty log directory gracefully.
+    diagnostics_service = DiagnosticsService(
+        log_reader=FileLogReader(settings.log_dir),
+        claude_sessions=SqliteClaudeSessionRepository(conn),
+        locks=SqliteSessionLockRepository(conn),
+        tmux=tmux,
+    )
+
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
@@ -534,6 +548,7 @@ def create_app(
         panic_service=panic_service,
         unlock_service=unlock_service,
         lockdown_service=lockdown_service,
+        diagnostics_service=diagnostics_service,
     )
 
     # Phase 6 C6.4 — HeartbeatPumper. Auto-on in prod/dev (writes to

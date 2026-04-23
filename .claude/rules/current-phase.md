@@ -1,36 +1,92 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 8 — Observability + Limits
-**Aktiver Checkpoint**: **C8.2** — /log + /errors + /ps + /update
-**Letzter abgeschlossener Checkpoint**: **C8.1** — Max-Limit-Persistenz
-+ 10%-Warnung + Send-Prompt-Guard
+**Aktiver Checkpoint**: **C8.3** — Circuit-Breaker für externe Adapter
+**Letzter abgeschlossener Checkpoint**: **C8.2** — /log + /errors + /ps
++ /update (DiagnosticsService + FileLogReader + Command-Routen)
 **User-Freigabe für Phase 8**: ✅ erteilt
 
 ## Wie ich in der nächsten Session weitermache
 
 1. Diese Datei lesen.
-2. `.claude/rules/phase-8.md` lesen — 4 Checkpoints + Architektur.
-3. `git log --oneline -34` für den Commit-Stand bis C8.1-Close.
+2. `.claude/rules/phase-8.md` lesen — Sektion „C8.3 — Circuit-Breaker".
+3. `git log --oneline -4` für den Commit-Stand bis C8.2-Close.
 4. `venv/bin/pytest tests/unit/ tests/integration/
    --ignore=tests/unit/test_hook_common.py
    --ignore=tests/integration/test_hook_script.py
    --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte **1392/1392 grün** (+ 1 skipped wenn ffmpeg fehlt)
-   zeigen. mypy --strict clean auf 112 source files. ruff
+   sollte **1442/1442 grün** (+ 1 skipped wenn ffmpeg fehlt)
+   zeigen. mypy --strict clean auf 116 source files. ruff
    clean (bis auf pre-existing E731 in `delete_service.py`).
-5. Mit **C8.2** anfangen — siehe `.claude/rules/phase-8.md`
-   Sektion „C8.2":
-   - `application/diagnostics_service.py` — tail't die JSONL-
-     Logs aus `settings.log_dir`, filtert auf `wa_msg_id` /
-     Level. `recent_errors(n)`, `read_trace(msg_id)`,
-     `active_sessions()`.
-   - CommandHandler-Routes für `/log <msg_id>` (ohne Args →
-     hint), `/errors`, `/ps`, `/update`.
-   - `/log`-Output läuft durch die OutputService-Size-Pipeline
-     wenn er >10KB wird (C3.5-Pattern wiederverwenden).
-   - Tests: 4+ unit für DiagnosticsService (tail-logik,
-     msg_id-filter, non-JSON-lines robust, leeres Log-Dir → []).
-     1 integration via /webhook mit fixture-JSONL in tmp_path.
+5. Mit **C8.3** anfangen — siehe `.claude/rules/phase-8.md`
+   Sektion „C8.3":
+   - `adapters/resilience.py` — `CircuitBreaker`-Klasse + `@resilient`-
+     Decorator. 5 Fehler in 60 s → 5 min OPEN → Half-Open-Probe →
+     CLOSED bei Erfolg / OPEN bei Fail.
+   - Decorator auf `WhatsAppCloudSender.send_text`,
+     `MetaMediaDownloader.download`, `WhisperCppTranscriber.transcribe`.
+   - `CircuitOpenError` mit `service_name` + `reopens_at`;
+     CommandHandler rendert `⚠️ [service] momentan nicht erreichbar,
+     re-try in 4m 32s.`.
+   - Tests: 8+ unit für CircuitBreaker (alle State-Transitions,
+     Thread-Safety), 2 integration (echter MetaMediaDownloader mit
+     httpx MockTransport 5x HTTP 503 → 6ter Call raise't
+     CircuitOpenError; clock advance → Probe).
+
+## C8.2 liefert (Live-Verhalten)
+
+- `/log <msg_id>` → rendert den chronologischen Trace aller
+  JSONL-App-Events aus `settings.log_dir/app.jsonl`, die auf die
+  `msg_id` matchen. Ohne Args: freundlicher Verwendungs-Hint.
+  Bounded via `MAX_TRACE_EVENTS=200`; OutputService wickelt den
+  >10KB-Dialog automatisch ab (Command-Handler → `output_service.
+  deliver` ist schon C3.5-verdrahtet).
+- `/errors` → letzte 10 WARNING/ERROR/CRITICAL-Events aus
+  `app.jsonl`. `"keine Fehler in den letzten Events 🎉"` bei leerem
+  Log.
+- `/ps` → Aktive Claude-Sessions mit Mode-Badge + Lock-Owner-Badge
+  + tmux-liveness + Tokens/Turns/Context-Fill. `DiagnosticsService.
+  active_sessions()` joined `claude_sessions` + `session_locks` +
+  `tmux.list_sessions(prefix="wb-")`. Ohne tmux (TEST-env) →
+  `"keine aktiven Sessions."`.
+- `/update` → Text-Hint auf manuellen Claude-Code-Update-Ablauf
+  (Spec §22). Kein State-Zugriff, funktioniert auch wenn
+  DiagnosticsService fehlt.
+- Lockdown-Filter: `/errors`, `/ps`, `/log`, `/update` sind
+  jetzt Teil der Lockdown-Allow-List (read-only Diagnostik, hilft
+  dem User die Ursache zu finden bevor er den PIN tippt).
+
+## Phase-8-Architektur (C8.2-Layer)
+
+- **Domain** (pure): `whatsbot/domain/log_events.py` — `LogEntry`
+  dataclass, `parse_log_line` (robust gegen Garbage), `filter_by_msg_id`,
+  `filter_errors`. `ERROR_LEVELS = frozenset({"error", "warning",
+  "critical"})`.
+- **Port**: `whatsbot/ports/log_reader.py` — Protocol `LogReader.
+  read_tail(*, max_lines)`.
+- **Adapter**: `whatsbot/adapters/file_log_reader.py` — tail't
+  `<log_dir>/<filename>` via `collections.deque(fh, maxlen=...)`,
+  silent bei FileNotFound / OSError. Garbage-Zeilen werden von
+  `parse_log_line` geschluckt, nie geraised.
+- **Application**: `whatsbot/application/diagnostics_service.py` —
+  `DiagnosticsService` mit 4 Public-Methoden (`read_trace`,
+  `recent_errors`, `active_sessions`, `format_update_hint`) plus
+  jeweilige `format_*`-Renderer. `SessionSnapshot` dataclass.
+  Alle externen Services (tmux / locks / claude_sessions) sind
+  optional — fehlt einer, degradiert die Funktion statt zu crashen.
+- **Wiring** in `main.py`: `DiagnosticsService` wird unconditional
+  gebaut (FileLogReader ist billig, fehlendes log_dir → `[]`) und
+  an den CommandHandler via `diagnostics_service=`-Param übergeben.
+
+**Tests-Stand**: 1442/1442 passing (+1 skipped wenn ffmpeg fehlt).
+mypy --strict clean auf 116 source files, ruff clean auf allen
+angefassten Files. Neue Tests:
+- `tests/unit/test_log_events.py` — 10 Tests.
+- `tests/unit/test_file_log_reader.py` — 7 Tests.
+- `tests/unit/test_diagnostics_service.py` — 17 Tests.
+- `tests/unit/test_diagnostics_commands.py` — 11 Tests.
+- `tests/integration/test_diagnostics_e2e.py` — 5 Tests (signed
+  /webhook, tmp_path-JSONL, tmux-less → /ps leer).
 
 ## C8.1 liefert (Live-Verhalten)
 

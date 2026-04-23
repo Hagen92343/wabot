@@ -7,6 +7,76 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 8 — Observability + Limits (in progress)
 
+#### C8.2 — Diagnostics-Commands (/log /errors /ps /update) ✅
+
+Die Spec-§11-Diagnose-Commands gehen live. Vom Handy aus ist
+der Bot jetzt selbst beobachtbar: `/log <msg_id>` zieht den
+vollen Event-Trace einer Inbound-Message aus `app.jsonl`,
+`/errors` listet die letzten 10 Warnings/Errors, `/ps` zeigt
+laufende Claude-Sessions mit Mode-Badge + Lock-Owner +
+tmux-liveness + Token-Fill, `/update` erklärt den manuellen
+Claude-Code-Update-Ablauf (Spec §22).
+
+- **Domain (pure)**: `domain/log_events.py` — `LogEntry`
+  dataclass + `parse_log_line` (robust gegen Garbage, tolerant
+  gegen missing fields, akzeptiert `ts` und `timestamp` als
+  Alias), `filter_by_msg_id`, `filter_errors`. `ERROR_LEVELS
+  = frozenset({"error","warning","critical"})` —
+  Circuit-Opens / Hook-Denies loggen auf WARNING und
+  gehören in `/errors`.
+- **Port + Adapter**: `ports/log_reader.py` Protocol +
+  `adapters/file_log_reader.py` — tail't `<log_dir>/<filename>`
+  via `collections.deque(fh, maxlen=max_lines)` (bounded-memory,
+  egal wie groß die Log-Datei ist). Missing file / missing dir
+  / OS error → `[]` statt crash. Non-JSON + malformed lines
+  werden silent geskippt.
+- **Application**: `application/diagnostics_service.py` —
+  `DiagnosticsService` mit vier Public-Methoden:
+  - `read_trace(msg_id)` + `format_trace(msg_id, entries)` —
+    filter + render. Cap auf `MAX_TRACE_EVENTS=200` so ein
+    runaway trace nicht den Prompt-Buffer sprengt; OutputService
+    wickelt den >10KB-Dialog automatisch ab (C3.5-Pattern).
+  - `recent_errors(limit=10)` + `format_errors`.
+  - `active_sessions()` + `format_sessions(snaps)` — joined
+    `claude_sessions.list_all()` mit `tmux.list_sessions(prefix=
+    "wb-")` für tmux-alive-Check und `session_locks.get()` für
+    Owner-Badge. Returnt `list[SessionSnapshot]`. Ohne tmux
+    (TEST-env) → jede Session markiert als `tmux_alive=False`.
+  - `format_update_hint()` — reiner Text, kein State-Zugriff.
+- **CommandHandler**: neue Konstanten `_LOG_COMMAND`/`_LOG_PREFIX`,
+  `_ERRORS_COMMAND`, `_PS_COMMAND`, `_UPDATE_COMMAND`. Route-
+  Dispatcher ruft die neuen `_handle_log` / `_handle_errors` /
+  `_handle_ps` / `_handle_update`-Methoden, die jeweils direkt
+  an den `DiagnosticsService.format_*` delegieren. Ohne Args
+  für `/log` → freundlicher Usage-Hint. Alle vier Commands +
+  `/log <msg_id>`-Präfix sind in der Lockdown-Allow-Liste
+  aufgenommen (Spec §7: read-only Diagnostik während Lockdown
+  ist safe und hilft der Ursachen-Klärung).
+- **Wiring** (`main.py`): `DiagnosticsService` wird
+  unconditional gebaut (FileLogReader mit `settings.log_dir`,
+  SqliteClaudeSessionRepository, SqliteSessionLockRepository,
+  und — wenn gebaut — der TmuxController) und per neuem
+  `diagnostics_service=`-Kwarg an den CommandHandler übergeben.
+
+**Tests** (50 neue, alle grün):
+- `tests/unit/test_log_events.py` — 10 Tests (parse-edges,
+  missing-fields, non-dict JSON, coercion, filter-Semantik).
+- `tests/unit/test_file_log_reader.py` — 7 Tests (max_lines-
+  cap, newest-last-order, missing dir/file, garbage lines,
+  custom filename).
+- `tests/unit/test_diagnostics_service.py` — 17 Tests (read_trace
+  + format_trace + recent_errors + format_errors + active_sessions
+  join-Matrix + format_sessions + update-hint).
+- `tests/unit/test_diagnostics_commands.py` — 11 Tests
+  (CommandHandler-Routen inklusive ohne-DiagnosticsService-Fallback).
+- `tests/integration/test_diagnostics_e2e.py` — 5 Tests
+  (signed /webhook, tmp_path `app.jsonl` mit Garbage-Line,
+  ohne tmux → /ps leer, /log ohne Args → Usage-Hint).
+
+**Tests-Stand**: 1442/1442 grün (Baseline 1392 + 50). mypy
+`--strict` clean auf 116 source files. ruff clean auf allen
+angefassten Files.
+
 #### C8.1 — Max-Limit-Persistenz + 10%-Warnung ✅
 
 Die `max_limits`-Tabelle (Phase-1-Schema) wird endlich bespielt.

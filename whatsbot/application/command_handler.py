@@ -28,6 +28,7 @@ from whatsbot.application.delete_service import (
     PanicPinNotConfiguredError,
     PendingDeleteExpiredError,
 )
+from whatsbot.application.diagnostics_service import DiagnosticsService
 from whatsbot.application.force_service import ForceService
 from whatsbot.application.kill_service import KillService
 from whatsbot.application.limit_service import MaxLimitActiveError
@@ -89,15 +90,33 @@ _KILL_PREFIX: Final = "/kill "
 _PANIC_COMMAND: Final = "/panic"
 _UNLOCK_PREFIX: Final = "/unlock "
 _UNLOCK_COMMAND: Final = "/unlock"
+# Phase 8 C8.2 — diagnostics commands (Spec §11).
+_LOG_COMMAND: Final = "/log"
+_LOG_PREFIX: Final = "/log "
+_ERRORS_COMMAND: Final = "/errors"
+_PS_COMMAND: Final = "/ps"
+_UPDATE_COMMAND: Final = "/update"
 
 # Spec §7 lockdown filter — these are the only commands the bot
 # answers while lockdown is engaged. /unlock is the way out;
 # /help, /ping, /status are read-only diagnostics that are
 # safe to answer (and useful — the user wants to know it's
 # really their bot before tipping the PIN).
-_LOCKDOWN_ALLOWED_PREFIXES: Final = (_UNLOCK_PREFIX,)
+_LOCKDOWN_ALLOWED_PREFIXES: Final = (_UNLOCK_PREFIX, _LOG_PREFIX)
+# /errors + /ps + /log are read-only diagnostics safe under lockdown
+# — they help the user figure out *why* lockdown engaged before they
+# commit the PIN.
 _LOCKDOWN_ALLOWED_COMMANDS: Final = frozenset(
-    {_UNLOCK_COMMAND, "/help", "/ping", "/status"}
+    {
+        _UNLOCK_COMMAND,
+        _ERRORS_COMMAND,
+        _PS_COMMAND,
+        _LOG_COMMAND,
+        _UPDATE_COMMAND,
+        "/help",
+        "/ping",
+        "/status",
+    }
 )
 
 
@@ -126,6 +145,7 @@ class CommandHandler:
         panic_service: PanicService | None = None,
         unlock_service: UnlockService | None = None,
         lockdown_service: LockdownService | None = None,
+        diagnostics_service: DiagnosticsService | None = None,
     ) -> None:
         self._projects = project_service
         self._allow = allow_service
@@ -143,6 +163,7 @@ class CommandHandler:
         self._panic = panic_service
         self._unlock = unlock_service
         self._lockdown = lockdown_service
+        self._diagnostics = diagnostics_service
         self._log = get_logger("whatsbot.commands")
 
     # ---- entrypoint -------------------------------------------------------
@@ -226,6 +247,18 @@ class CommandHandler:
                 reply="Verwendung: /unlock <PIN>",
                 command="/unlock",
             )
+
+        # Phase 8 C8.2 — diagnostics commands.
+        if cmd.startswith(_LOG_PREFIX):
+            return self._handle_log(cmd[len(_LOG_PREFIX) :].strip())
+        if cmd == _LOG_COMMAND:
+            return self._handle_log("")
+        if cmd == _ERRORS_COMMAND:
+            return self._handle_errors()
+        if cmd == _PS_COMMAND:
+            return self._handle_ps()
+        if cmd == _UPDATE_COMMAND:
+            return self._handle_update()
 
         # Non-slash text → prompt to the active project (Phase-4
         # C4.2c). Empty text falls through to the default help
@@ -1004,6 +1037,64 @@ class CommandHandler:
         return CommandResult(
             reply="🔓 Lockdown aufgehoben.",
             command="/unlock",
+        )
+
+    # ---- /log /errors /ps /update (Phase 8 C8.2) --------------------------
+
+    def _handle_log(self, args: str) -> CommandResult:
+        if self._diagnostics is None:
+            return CommandResult(
+                reply="⚠️ Diagnostics nicht verfügbar.",
+                command="/log",
+            )
+        msg_id = args.strip()
+        if not msg_id:
+            return CommandResult(
+                reply=(
+                    "Verwendung: /log <msg_id>\n"
+                    "msg_id aus /errors oder /ps kopieren, "
+                    "oder aus einer früheren Bot-Antwort."
+                ),
+                command="/log",
+            )
+        entries = self._diagnostics.read_trace(msg_id)
+        reply = self._diagnostics.format_trace(msg_id, entries)
+        return CommandResult(reply=reply, command="/log")
+
+    def _handle_errors(self) -> CommandResult:
+        if self._diagnostics is None:
+            return CommandResult(
+                reply="⚠️ Diagnostics nicht verfügbar.",
+                command="/errors",
+            )
+        entries = self._diagnostics.recent_errors()
+        reply = self._diagnostics.format_errors(entries)
+        return CommandResult(reply=reply, command="/errors")
+
+    def _handle_ps(self) -> CommandResult:
+        if self._diagnostics is None:
+            return CommandResult(
+                reply="⚠️ Diagnostics nicht verfügbar.",
+                command="/ps",
+            )
+        snaps = self._diagnostics.active_sessions()
+        reply = self._diagnostics.format_sessions(snaps)
+        return CommandResult(reply=reply, command="/ps")
+
+    def _handle_update(self) -> CommandResult:
+        if self._diagnostics is None:
+            # Fallback-Hint ohne DiagnosticsService — das ist reine
+            # Text-Ausgabe, kein echter State-Zugriff nötig.
+            return CommandResult(
+                reply=(
+                    "Claude-Code-Updates laufen manuell. "
+                    "Details: docs/RUNBOOK.md §Update."
+                ),
+                command="/update",
+            )
+        return CommandResult(
+            reply=self._diagnostics.format_update_hint(),
+            command="/update",
         )
 
     def _maybe_block_for_lockdown(self, cmd: str) -> CommandResult | None:
