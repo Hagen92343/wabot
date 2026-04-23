@@ -5,6 +5,172 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
+### Phase 5 — Input-Lock + Multi-Session ✅ (complete)
+
+Alle 5 Checkpoints grün. Spec §7 Soft-Preemption + `/release` +
+PIN-gated `/force` + tmux-Status-Bar Lock-Owner-Badge stehen.
+Bot und lokales Terminal können sicher parallel an derselben
+Claude-Session arbeiten — lokales Terminal hat Vorrang, der Bot
+respektiert es ohne Lock-stehlen, und der User hat einen
+expliziten Override per WhatsApp.
+
+- ✅ C5.1 — Lock-Domain + SQLite-Repository + LockService (a/b/c)
+- ✅ C5.2 — Wiring (TranscriptIngest + SessionService.send_prompt
+  + CommandHandler + `/release`)
+- ✅ C5.3 — End-to-End Integration-Smoke via `/webhook`
+- ✅ C5.4 — `/force <name> <PIN> <prompt>` PIN-gated Override
+- ✅ C5.5 — tmux-Status-Bar Lock-Owner-Badge + Live-Repaint
+
+**Tests**: 993/993 passing, mypy --strict clean (80 source files),
+ruff clean auf allen Phase-5-Files.
+
+#### C5.5 — tmux-Status-Bar Lock-Owner-Badge ✅
+
+- **`whatsbot/domain/locks.py`** — pure `lock_owner_badge(owner)`:
+  BOT → `🤖 BOT`, LOCAL → `👤 LOCAL`, FREE/None → `— FREE`.
+- **`SessionService._paint_status_bar`** liest jetzt den Owner via
+  `_locks.current(project)` und rendert
+  `{mode_badge} · {owner_badge} [tmux_name]`, z.B.
+  `🟢 NORMAL · 🤖 BOT [wb-alpha]`.
+- **`SessionService.repaint_status_bar(project)`** — neue public
+  API für Live-Updates. No-op bei totem tmux oder fehlendem
+  Project, swallowt Exceptions (rein kosmetisch — darf nie eine
+  Lock-Op fail-closen).
+- **`LockService.__init__(on_owner_change=...)`-Callback** — feuert
+  nur bei tatsächlichen Owner-*Wechseln*, nicht bei no-op-Refreshes
+  (Bot re-acquires, repeated local-input pulses). Pro Operation:
+  - `acquire_for_bot` → fire bei erst-grant
+  - `force_bot` → fire bei flip from non-BOT
+  - `note_local_input` → fire bei flip from non-LOCAL
+  - `release` → fire wenn row existierte
+  - `sweep_expired` → fire pro reaped project
+  Callback-Failures werden geloggt, brechen aber die Lock-Op nie.
+- **`whatsbot/main.py`** verdrahtet `LockService.on_owner_change` →
+  `SessionService.repaint_status_bar` via Forward-Ref-Liste
+  (`session_service_status_ref`) — gleiche Pattern wie für
+  auto-compact, weil SessionService nach LockService gebaut wird.
+- Test-Regression: `test_session_service.py` Label-Assertion von
+  `🟢 NORMAL [wb-alpha]` auf `🟢 NORMAL · — FREE [wb-alpha]`
+  nachgezogen.
+- Tests (17 neu, 993 total):
+  - `test_lock_status_badge` (17): 4 pure-helper-Tests, 5 paint-
+    Layer-Tests (BOT/LOCAL/FREE-Badge, repaint-no-op-Pfade bei
+    totem tmux + missing project), 8 callback-Tests (alle
+    Operationen × no-op-vs-flip + Callback-Failure-Containment).
+
+#### C5.4 — `/force <name> <PIN> <prompt>` PIN-gated Lock-Override ✅
+
+Power-Tool für den Fall, dass der lokale Lock stale ist (User
+ist weg vom Mac aber das Lock-Row liegt noch unter 60s — vor
+Auto-Release). Statt zu warten kann der User per WhatsApp den
+Lock mit der `panic-pin` aus dem Keychain übernehmen.
+
+- **`whatsbot/application/force_service.py`** —
+  `ForceService.force(name, pin)`: validate name → check project
+  exists (FK-safety, sonst sqlite IntegrityError) → PIN-Check via
+  `hmac.compare_digest` gegen Keychain-`panic-pin` →
+  `lock_service.force_bot(name)`. Wiederverwendet
+  `InvalidPinError` und `PanicPinNotConfiguredError` aus
+  `delete_service` — beide Commands keyen auf denselben
+  Keychain-Eintrag, gleiche Semantik.
+- **`CommandHandler._handle_force(args)`** — parse'd 3 Tokens via
+  `split(maxsplit=2)`, sodass der Prompt Leerzeichen + sogar
+  weitere PIN-artige Strings enthalten darf. Bei PIN-Match →
+  `force_service.force` + `session_service.send_prompt`. Reply:
+  `🔓 Lock fuer 'name' uebernommen.\n📨 an name: <preview>`.
+  Bei PIN-Miss → `⚠️ Falsche PIN`, Lock bleibt LOCAL, kein Prompt
+  zugestellt.
+- **Bonus-Fix**: `_dispatch_prompt`-Hint korrigiert auf die echte
+  Syntax `/force <name> <PIN> <prompt>` (war vorher misleading
+  ohne PIN). Mit Regression-Test.
+- **`whatsbot/main.py`** baut ForceService nur wenn lock_service
+  und session_service vorhanden sind; wired ins
+  CommandHandler-`force_service`-Param.
+- Tests (20 neu, 976 total):
+  - `test_force_service` (7): PIN-Pfade, Project-FK,
+    Constant-Time-Compare, Lock unverändert bei Mismatch, missing
+    Panic-PIN.
+  - `test_force_command` (12): Parsing-Edges (Whitespace, Multi-
+    Token-Prompts, fehlende Args), no-config-Guard,
+    Hint-Korrektur-Regression, Idempotenz ohne Vorlock.
+  - `test_lock_e2e::test_force_overrides_local_lock_with_pin`
+    (1): real tmux, /webhook, signed payload, wrong-PIN → keep
+    LOCAL, right-PIN → flip to BOT + 📨.
+
+#### C5.3 — Lock-Soft-Preemption End-to-End via `/webhook` ✅
+
+- **`tests/integration/test_lock_e2e.py`** — 2 Tests gegen einen
+  full-wired TestClient mit echtem `SubprocessTmuxController` und
+  `safe-claude=/bin/true`:
+  - Preseed local lock → `/p alpha hi` → 🔒-Reply, Lock bleibt
+    LOCAL, kein Prompt landet im tmux-Pane.
+  - Preseed local lock → `/release alpha` → Lock weg →
+    `/p alpha ready now` läuft durch → 📨-Ack.
+
+#### C5.2 — LockService-Wiring ✅
+
+Hängt die LockService-Instanz an die drei Hot-Path-Komponenten
+und führt die `/release`-Commands ein.
+
+- **`TranscriptIngest`** — neuer Konstruktor-Param
+  `on_local_input: Callable[[str], None] | None`. Feuert aus
+  `_handle_user`, wenn ein non-ZWSP + non-empty user-turn landet
+  (also der Mensch direkt im tmux-Pane getippt hat).
+  Tool-Result-Events und Bot-prefixed-Turns triggern NICHT.
+- **`SessionService.__init__(lock_service=...)`** — `send_prompt`
+  ruft `lock_service.acquire_for_bot(project)` vor `tmux.send_text`.
+  Bei `LocalTerminalHoldsLockError` propagiert die Exception
+  hoch, der Prompt landet nicht im Pane.
+- **`CommandHandler._dispatch_prompt`** fängt
+  `LocalTerminalHoldsLockError` und rendert
+  `🔒 Terminal aktiv auf '<name>'. /force <name> <PIN> <prompt>
+  oder /release zum Freigeben`.
+- **Neue Commands `/release` + `/release <name>`** — setzt Lock
+  auf FREE für aktives oder benanntes Projekt. Idempotent
+  (nothing-to-release liefert eine friendly confirmation).
+- **`whatsbot/main.py`** verdrahtet *eine* LockService-Instanz
+  in TranscriptIngest, SessionService und CommandHandler — der
+  Sweeper-Hook ist vorbereitet (sweep_expired existiert),
+  Auto-Sweep per LaunchAgent-Heartbeat in einer späteren Phase.
+- Tests: 3 neue Wiring-Tests (`test_lock_wiring.py`) +
+  Anpassungen in test_command_handler / test_session_service.
+
+#### C5.1 — Lock-Domain + Repository + Service (a/b/c) ✅
+
+In drei atomaren Sub-Commits, Bottom-up.
+
+- **C5.1a `domain/locks.py`** (pure):
+  - `LockOwner` StrEnum (`free` / `bot` / `local`) — matcht den
+    `CHECK(owner IN (...))`-Constraint aus `session_locks`.
+  - `SessionLock`-Dataclass mit `project_name`, `owner`,
+    `acquired_at`, `last_activity_at`.
+  - `evaluate_bot_attempt(current, *, now, timeout_seconds,
+    project_name) → (AcquireOutcome, SessionLock)` — pure
+    State-Transition. Free/Bot → grant; Local idle past timeout
+    → auto-release-then-grant; Local fresh → DENIED_LOCAL_HELD.
+  - `mark_local_input(current, *, now, project_name)` — pure
+    Local-Pre-Emption.
+  - `is_expired(lock, *, now, timeout_seconds)` für den Sweeper.
+  - `LOCK_TIMEOUT_SECONDS = 60` (Spec §7).
+  - 14 unit tests inkl. aller 9 Owner×Event-Übergänge plus
+    Timeout-Edge-Cases.
+- **C5.1b Port + SQLite-Adapter**:
+  - `whatsbot/ports/session_lock_repository.py` — Protocol
+    (`get` / `upsert` / `delete` / `list_all`).
+  - `whatsbot/adapters/sqlite_session_lock_repository.py` —
+    gegen die existierende `session_locks`-Tabelle mit
+    Round-Trip-Tests (8) inkl. CHECK-Constraint-Regression.
+- **C5.1c `application/lock_service.py`**:
+  - `acquire_for_bot(project)` raise't `LocalTerminalHoldsLockError`
+    bei DENIED_LOCAL_HELD; sonst persistiert + returnt
+    `AcquireResult(outcome, lock)`.
+  - `note_local_input(project)` — Local-Pre-Emption.
+  - `release(project)` — Boolean (existed-or-not).
+  - `force_bot(project)` — Unconditional (Basis für `/force`).
+  - `sweep_expired()` — räumt idle-LOCAL ab.
+  - `current(project)` — read-only Lookup für Status-Bar.
+  - Clock-injectable für Tests. 16 unit tests.
+
 ### Phase 3 — Security-Core ✅ (complete)
 
 Alle 6 Checkpoints grün, Phase 3 komplett gebaut und verifiziert.

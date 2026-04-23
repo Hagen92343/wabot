@@ -1,8 +1,8 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 5 — Input-Lock + Multi-Session (alle Checkpoints durch ✅ — bereit für close-commit)
-**Aktiver Checkpoint**: — (alle C5.x grün, nur noch `feat(phase-5): complete phase 5` offen)
-**Letzter abgeschlossener Checkpoint**: C5.5 (tmux-Status-Bar Lock-Owner-Badge)
+**Aktive Phase**: Phase 5 abgeschlossen ✅ — wartet auf User-Freigabe für Phase 6
+**Aktiver Checkpoint**: — (Phase 5 komplett, Phase 6 noch nicht begonnen)
+**Letzter abgeschlossener Checkpoint**: Phase-5-Close (CHANGELOG + Sammel-Commit)
 
 ## Phase 5 — laufender Stand (zum Wiederaufnehmen)
 
@@ -86,20 +86,23 @@
 mypy `--strict` clean auf allen 80 source files, ruff clean auf
 allen angefassten Dateien.
 
-### Was noch offen in Phase 5
+### Phase 5 inhaltlich abgeschlossen
 
-- ⏭ **Phase-5-Close-Commit**: `feat(phase-5): complete phase 5`
-  (alle C5.x grün, nur noch der Sammel-Commit + CHANGELOG.md-Eintrag
-  fehlen).
+Alle C5.x grün, CHANGELOG.md-Eintrag geschrieben,
+`feat(phase-5): complete phase 5`-Sammel-Commit gemacht.
+Wartet jetzt auf User-Freigabe für **Phase 6 — Kill-Switch +
+Watchdog + Sleep-Handling** (siehe Spec §21 + `phases-3-to-9.md`).
 
-### Wie wiedereinsteigen
+### Wie für Phase 6 wiedereinsteigen
 
 1. Diese Datei lesen.
-2. `.claude/rules/phase-5.md` (Plan-Doc).
-3. `git log --oneline -10` für den Commit-Stand seit Phase 4 close.
-4. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte 993/993 grün zeigen.
-5. Phase-5-Close: CHANGELOG.md ergänzen + `feat(phase-5): complete phase 5`-Commit, dann auf User-Freigabe für Phase 6 warten.
+2. `phases-3-to-9.md` Phase-6-Stub als Startpunkt.
+3. **Vor dem Bauen**: `.claude/rules/phase-6.md` schreiben (gleiche
+   Struktur wie phase-5.md), User reviewen lassen, *dann* erst
+   implementieren.
+4. `git log --oneline -12` für den Commit-Stand bis Phase-5-Close.
+5. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
+   sollte 993/993 grün zeigen — die Phase-6-Baseline.
 
 ## Phase 4 abgeschlossen ✅
 
