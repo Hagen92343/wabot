@@ -74,6 +74,9 @@ def _run(
     heartbeat_age_seconds: float | None = None,
     panic_marker: bool = False,
     threshold: int = 120,
+    heartbeat_pid: int | None = None,
+    fake_uptime: int | None = None,
+    boot_grace: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Invoke watchdog.sh with the given heartbeat-state setup."""
     heartbeat_path = workdir / "whatsbot-heartbeat"
@@ -81,7 +84,10 @@ def _run(
     log_path = workdir / "logs" / "watchdog.jsonl"
 
     if heartbeat_age_seconds is not None:
-        heartbeat_path.write_text("seed", encoding="utf-8")
+        body = "seed"
+        if heartbeat_pid is not None:
+            body = f"whatsbot heartbeat\npid={heartbeat_pid}\n"
+        heartbeat_path.write_text(body, encoding="utf-8")
         # Roll mtime backwards by ``heartbeat_age_seconds``.
         target_mtime = time.time() - heartbeat_age_seconds
         os.utime(heartbeat_path, (target_mtime, target_mtime))
@@ -97,6 +103,10 @@ def _run(
         "WHATSBOT_WATCHDOG_LOG": str(log_path),
         "WHATSBOT_WATCHDOG_STALE_SECONDS": str(threshold),
     }
+    if fake_uptime is not None:
+        env["WHATSBOT_WATCHDOG_FAKE_UPTIME"] = str(fake_uptime)
+    if boot_grace is not None:
+        env["WHATSBOT_WATCHDOG_BOOT_GRACE_SECONDS"] = str(boot_grace)
     return subprocess.run(
         ["bash", str(SCRIPT)],
         env=env,
@@ -245,6 +255,121 @@ def test_log_lines_are_valid_json_with_required_fields(
         assert row.get("logger") == "whatsbot.watchdog"
         assert "level" in row
         assert "event" in row
+
+
+# ---- C6.5 sleep-grace + boot-grace ----------------------------
+
+
+def test_pid_alive_grace_skips_engage_on_stale_heartbeat(
+    workdir: Path, stub_bin: Path
+) -> None:
+    """Mac-Sleep scenario: heartbeat is stale because the bot was
+    suspended along with the OS, but the bot's PID is still alive.
+    Watchdog must NOT engage."""
+    # Use the test process's own PID — guaranteed alive.
+    own_pid = os.getpid()
+    proc = _run(
+        workdir,
+        stub_bin,
+        heartbeat_age_seconds=999.0,
+        heartbeat_pid=own_pid,
+        # Also pin uptime way past boot-grace to isolate the
+        # PID-alive-grace path.
+        fake_uptime=99_999,
+    )
+    assert proc.returncode == 0
+    events = [r["event"] for r in _read_log(workdir)]
+    assert "watchdog_grace_pid_alive" in events
+    assert "watchdog_engaged" not in events
+    # No tear-down side effects.
+    assert _read_stub_calls(workdir) == []
+    assert not (workdir / "whatsbot-PANIC").exists()
+
+
+def test_dead_pid_still_engages_after_grace_window(
+    workdir: Path, stub_bin: Path
+) -> None:
+    """Bot-died scenario: heartbeat has a PID that doesn't exist
+    anymore. Watchdog engages normally."""
+    # Spawn a short-lived child, capture its PID, wait for it to
+    # die — that PID is now reliably dead.
+    spawned = subprocess.run(
+        ["bash", "-c", "echo $$"], capture_output=True, text=True, check=True
+    )
+    dead_pid = int(spawned.stdout.strip())
+    # Be defensive: if by accident the PID was recycled, skip.
+    if subprocess.run(
+        ["kill", "-0", str(dead_pid)], capture_output=True, check=False
+    ).returncode == 0:
+        pytest.skip("PID was recycled, can't test dead-PID path")
+
+    proc = _run(
+        workdir,
+        stub_bin,
+        heartbeat_age_seconds=999.0,
+        heartbeat_pid=dead_pid,
+        fake_uptime=99_999,
+    )
+    assert proc.returncode == 0
+    events = [r["event"] for r in _read_log(workdir)]
+    assert "watchdog_engaged" in events
+    assert "watchdog_grace_pid_alive" not in events
+
+
+def test_boot_grace_skips_engage_on_missing_heartbeat(
+    workdir: Path, stub_bin: Path
+) -> None:
+    """First wake-up after boot: bot might still be coming up,
+    no heartbeat yet. Watchdog gives it grace."""
+    proc = _run(
+        workdir,
+        stub_bin,
+        heartbeat_age_seconds=None,  # missing
+        fake_uptime=10,  # 10 s after boot
+        boot_grace=300,
+    )
+    assert proc.returncode == 0
+    events = [r["event"] for r in _read_log(workdir)]
+    assert "watchdog_grace_recent_boot" in events
+    assert "watchdog_engaged" not in events
+    assert _read_stub_calls(workdir) == []
+
+
+def test_no_boot_grace_after_uptime_window(
+    workdir: Path, stub_bin: Path
+) -> None:
+    """Long-running system + missing heartbeat = real bot crash.
+    Watchdog engages."""
+    proc = _run(
+        workdir,
+        stub_bin,
+        heartbeat_age_seconds=None,
+        fake_uptime=99_999,
+        boot_grace=300,
+    )
+    assert proc.returncode == 0
+    events = [r["event"] for r in _read_log(workdir)]
+    assert "watchdog_engaged" in events
+    assert "watchdog_grace_recent_boot" not in events
+
+
+def test_pid_alive_check_works_without_pid_field(
+    workdir: Path, stub_bin: Path
+) -> None:
+    """Old heartbeat format without 'pid=' line: PID-grace can't
+    apply, watchdog falls through to its normal engage path."""
+    # Use the legacy "seed" body — no pid= line.
+    proc = _run(
+        workdir,
+        stub_bin,
+        heartbeat_age_seconds=999.0,
+        heartbeat_pid=None,  # → uses 'seed' body
+        fake_uptime=99_999,
+    )
+    assert proc.returncode == 0
+    events = [r["event"] for r in _read_log(workdir)]
+    assert "watchdog_engaged" in events
+    assert "watchdog_grace_pid_alive" not in events
 
 
 def _ensure_iter() -> None:  # pragma: no cover

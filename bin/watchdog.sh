@@ -70,6 +70,33 @@ log_json() {
         "$(now_iso)" "$event" "$extra" >> "$LOG"
 }
 
+# Seconds since system boot. Used by C6.5 boot-grace.
+# macOS: ``sysctl -n kern.boottime`` returns ``{ sec = 1700000000, usec = 0 } ...``.
+# Linux: ``/proc/uptime`` (first column is float uptime seconds).
+# Tests can override via ``WHATSBOT_WATCHDOG_FAKE_UPTIME``.
+system_uptime_seconds() {
+    if [ -n "${WHATSBOT_WATCHDOG_FAKE_UPTIME:-}" ]; then
+        echo "${WHATSBOT_WATCHDOG_FAKE_UPTIME}"
+        return 0
+    fi
+    local boottime
+    boottime="$( { sysctl -n kern.boottime 2>/dev/null \
+                   | grep -oE 'sec = [0-9]+' \
+                   | head -1 \
+                   | awk '{print $3}'; } || true)"
+    if [ -n "$boottime" ]; then
+        local now
+        now="$(now_epoch)"
+        echo $((now - boottime))
+        return 0
+    fi
+    if [ -r /proc/uptime ]; then
+        awk '{print int($1)}' /proc/uptime
+        return 0
+    fi
+    return 1
+}
+
 # 1. Panic-marker short-circuit. The bot itself initiated /panic;
 #    nothing for us to do.
 if [ -f "$PANIC_MARKER" ]; then
@@ -82,6 +109,7 @@ fi
 if [ ! -f "$HEARTBEAT" ]; then
     AGE="missing"
     STALE=1
+    BOT_PID=""
 else
     MTIME="$(file_mtime "$HEARTBEAT")"
     NOW="$(now_epoch)"
@@ -91,6 +119,12 @@ else
     else
         STALE=0
     fi
+    # Pull the bot's PID out of the heartbeat body (C6.4 format:
+    # "pid=<n>"). Empty string if the line isn't there. The
+    # ``|| true`` keeps ``set -e + pipefail`` from aborting when
+    # grep finds no match.
+    BOT_PID="$( { grep -E '^pid=' "$HEARTBEAT" 2>/dev/null \
+                  | head -1 | cut -d= -f2 | tr -d ' \r\n'; } || true)"
 fi
 
 if [ "$STALE" -eq 0 ]; then
@@ -100,7 +134,31 @@ if [ "$STALE" -eq 0 ]; then
     exit 0
 fi
 
-# 3. Stale → emergency tear-down.
+# 3. C6.5 sleep-grace: if the bot's PID from the heartbeat is still
+#    alive, the heartbeat staleness is most likely a Mac-Sleep
+#    artifact (the bot was suspended, not dead). Give it grace —
+#    the next 30 s tick will catch a real death by re-checking.
+if [ -n "$BOT_PID" ] && kill -0 "$BOT_PID" 2>/dev/null; then
+    log_json "watchdog_grace_pid_alive" \
+        "age_seconds" "$AGE" \
+        "pid" "$BOT_PID"
+    exit 0
+fi
+
+# 4. C6.5 boot-grace: if the system itself only just booted, the bot
+#    might still be coming up (LaunchAgent restart can take longer
+#    than the watchdog's 30 s tick). Skip the engage on missing
+#    heartbeat during the first $BOOT_GRACE_SECONDS after boot.
+BOOT_GRACE="${WHATSBOT_WATCHDOG_BOOT_GRACE_SECONDS:-300}"
+SYS_UPTIME="$(system_uptime_seconds || echo 0)"
+if [ "$AGE" = "missing" ] && [ "$SYS_UPTIME" -lt "$BOOT_GRACE" ]; then
+    log_json "watchdog_grace_recent_boot" \
+        "uptime_seconds" "$SYS_UPTIME" \
+        "boot_grace_seconds" "$BOOT_GRACE"
+    exit 0
+fi
+
+# 5. Stale + bot dead + not just-booted → emergency tear-down.
 log_json "watchdog_engaged" \
     "age" "\"$AGE\"" \
     "threshold_seconds" "$THRESHOLD"

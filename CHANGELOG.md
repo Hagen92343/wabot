@@ -5,6 +5,183 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
+### Phase 6 — Kill-Switch + Watchdog + Sleep-Handling ✅ (complete)
+
+Alle Kern-Checkpoints grün (C6.1–C6.6) plus optional C6.5 Sleep-
+Awareness. Spec §7 Notfall-Infrastruktur steht End-to-End: vier
+Eskalationsstufen vom Handy aus (`/stop` → `/kill` → `/panic` →
+`/unlock`), Heartbeat-Pumper + Watchdog-LaunchAgent als
+unabhängiger Backstop, Lockdown-Filter blockt alle Commands
+außer `/unlock` während engaged, StartupRecovery respektiert
+Lockdown.
+
+- ✅ C6.1 — `/stop` (Ctrl+C) + `/kill` (tmux kill-session + lock release)
+- ✅ C6.2 — `/panic` Vollkatastrophe in <2s mit 6-Step-Playbook
+- ✅ C6.3 — YOLO→Normal bei Panic (mode_events `panic_reset`)
+- ✅ C6.4 — Heartbeat-Pumper + Watchdog-LaunchAgent
+- ✅ C6.5 — Watchdog Sleep-Awareness (PID-Liveness + Boot-Grace)
+- ✅ C6.6 — `/unlock <PIN>` + Lockdown-Filter + StartupRecovery-Skip
+
+**Tests**: 1104/1104 passing (912 → 1104 = +192 für Phase 6),
+mypy --strict clean (93 source files), ruff clean.
+
+#### C6.6 — `/unlock <PIN>` + Lockdown-Filter ✅
+
+- **`whatsbot/application/unlock_service.py`**: PIN-Verify via
+  `hmac.compare_digest` gegen Keychain-`panic-pin` +
+  `lockdown_service.disengage()`. Spiegelt das ForceService-
+  Pattern. PIN-Check läuft AUCH wenn Lockdown nicht engaged ist
+  — kein info-leak via Timing.
+- **`CommandHandler` Lockdown-Filter** ganz oben in `handle()`:
+  während Lockdown engaged jeder Command außer `/unlock <PIN>`,
+  `/help`, `/ping`, `/status` wird mit `🔒 Bot ist im Lockdown.
+  /unlock <PIN> zum Aufheben.` geblockt. Auch nackte Prompts
+  (das gefährlichste Surface bei Handy-Diebstahl) sind geblockt.
+- **`CommandHandler._handle_unlock`**: 5 Reply-Pfade — korrekte
+  PIN+engaged → `🔓 Lockdown aufgehoben.`, PIN+nicht-engaged
+  → `🔓 Bot war nicht im Lockdown.`, falsche PIN → `⚠️ Falsche
+  PIN.`, missing keychain → `⚠️ Panic-PIN ist im Keychain
+  nicht gesetzt.`, bare `/unlock` → `Verwendung: /unlock <PIN>`.
+- **`StartupRecovery`** akzeptiert optional `lockdown_service`-
+  Param. Wenn engaged: skip YOLO-Reset + skip session-restore,
+  return `RecoveryReport(skipped_for_lockdown=True)`. Bot bleibt
+  up um `/unlock` zu beantworten, relauncht aber keine Claudes.
+- Tests: 6 unit `test_unlock_service.py`, 13 unit
+  `test_unlock_command.py` (Filter blockt /ls /new /p bare-prompts,
+  lässt /unlock /help /ping /status durch), 3 unit
+  `test_startup_recovery_lockdown.py`, 1 e2e `test_unlock_e2e.py`
+  (real tmux + signed /webhook → /panic → blockierte Replies →
+  wrong PIN → right PIN → /ls funktioniert wieder).
+
+#### C6.5 — Watchdog Sleep-Awareness ✅
+
+Zwei einfache Heuristiken im `bin/watchdog.sh` ohne pmset-log-
+Parsing:
+
+- **PID-Liveness-Grace**: Heartbeat enthält die Bot-PID (C6.4-
+  Format). Wenn die PID via `kill -0 <pid>` lebt, war die
+  Heartbeat-Staleness wahrscheinlich Mac-Sleep-Artefakt (Bot
+  war suspended, nicht tot). Watchdog skippt engage und
+  loggt `watchdog_grace_pid_alive`.
+- **Boot-Grace**: System-Uptime via portable `sysctl
+  -n kern.boottime` (macOS) / `/proc/uptime` (Linux) /
+  `WHATSBOT_WATCHDOG_FAKE_UPTIME` (tests). Bei missing-
+  heartbeat + Uptime <300 s skippt der Watchdog (LaunchAgent
+  könnte den Bot noch hochfahren). Loggt
+  `watchdog_grace_recent_boot`.
+
+Beide Pfade fallen sauber durch zu engage wenn die Heuristik
+nicht greift (PID dead → engage, Uptime >grace + missing
+heartbeat → engage). LaunchAgent-Plist exposed neue Env-Var
+`WHATSBOT_WATCHDOG_BOOT_GRACE_SECONDS=300`.
+
+5 neue Integration-Tests in `test_watchdog_script.py`:
+PID-alive grace mit own-PID, dead-PID engaged, boot-grace bei
+fake_uptime=10, no boot-grace bei fake_uptime=99999, Backwards-
+compat ohne pid= line in heartbeat.
+
+Bonus-Fix in watchdog.sh: pipeline-failures unter `set -euo
+pipefail` mit `|| true` abgesichert (grep no-match returns 1,
+würde sonst den ganzen Skript abbrechen).
+
+#### C6.4 — Heartbeat-Pumper + Watchdog-LaunchAgent ✅
+
+Spec §7 dead-man's-switch. Bot schreibt alle 30 s ein touch-File
+nach `/tmp/whatsbot-heartbeat`. Ein separater LaunchAgent
+(Watchdog) prüft alle 30 s die mtime — ist sie >120 s alt, killt
+der Watchdog alle wb-* tmux-Sessions, feuert pkill -9 -f
+safe-claude als Backstop, schreibt den panic-Marker damit der
+Bot beim Restart in Lockdown bleibt, und feuert eine macOS-
+Notification.
+
+- **`domain/heartbeat.py`** (pure): Konstanten + `is_heartbeat_stale`
+  + `format_heartbeat_payload` (header + version + pid + ISO ts).
+- **`ports/heartbeat_writer.py`** + **`adapters/file_heartbeat_writer.py`**:
+  atomic write (tmp + os.replace), parent-dir auto-create.
+- **`application/heartbeat_pumper.py`**: async background loop.
+  Erste Schreibung sofort in start() (Watchdog sieht das File
+  bei t=0). File-IO über asyncio.to_thread damit der event loop
+  nie blockiert. Schreibfehler werden geloggt aber brechen die
+  Loop nie. stop() cancelt sauber + löscht das File.
+- **`main.create_app(heartbeat_writer=..., enable_heartbeat=...)`**
+  + FastAPI `lifespan`-Context: in PROD/DEV automatisch on,
+  in TEST opt-in.
+- **`bin/watchdog.sh`** — bash-only (kein Python — funktioniert
+  auch bei kaputtem venv): mtime via portable stat -f %m /
+  stat -c %Y, nur wb-* tmux-Sessions, narrow `safe-claude`-
+  pattern für pkill, JSON-strukturiertes Logging.
+- **`launchd/com.DOMAIN.whatsbot.watchdog.plist.template`**:
+  RunAtLoad + StartInterval=30, KeepAlive=false (jeder Tick
+  ist ein short-lived shell — robuster als long-running loop).
+- **`bin/render-launchd.sh`** rolled jetzt drei Plists (Bot +
+  Backup + Watchdog).
+
+Tests: 33 (8 heartbeat domain, 8 file writer, 9 pumper async,
+8 watchdog script, 1 lifespan integration).
+
+#### C6.2 / C6.3 — `/panic` + YOLO-Reset + Lockdown ✅
+
+Sechs-stufiger /panic-Flow in `PanicService`, in genau dieser
+Reihenfolge:
+
+1. **Lockdown engage** (DB row + Touch-File `/tmp/whatsbot-PANIC`).
+   Muss zuerst, damit eine race-condition-Webhook nichts wieder
+   hochfährt was wir gerade abreißen.
+2. **wb-* tmux-Sessions** enumerieren + tmux kill-session pro
+   Session. tmux SIGHUP cascade triggert Claude graceful exit.
+3. **`pkill -9 -f safe-claude`** als Backstop für stuck Claudes.
+   Pattern bewusst eng (safe-claude statt claude) — keine
+   fremden Claude-Instanzen werden mit-getötet (Spec §21
+   Phase 6 Abbruch-Kriterium).
+4. **YOLO → Normal** pro Projekt + `mode_events.event='panic_reset'`
+   pro YOLO-Projekt (Spec §6 Invariante).
+5. **Locks release** pro Projekt — bot-state ist weg, Locks
+   wären sonst irreführend.
+6. **macOS-Notification** mit Sound (osascript), no-op auf Linux.
+
+Architektur-Bricks:
+- `domain/lockdown.py` (pure): LockdownState + engage/disengaged.
+  Idempotent — first-trigger-Metadata bleibt erhalten (Forensik).
+- `application/lockdown_service.py`: persistiert in
+  app_state.lockdown als JSON + Touch-File `/tmp/whatsbot-PANIC`.
+  Tolerant gegen JSON-Garble + Partial-Rows.
+- `ports/process_killer.py` + `adapters/subprocess_process_killer.py`:
+  pkill -9 -f wrapper, exit 1 (no-match) ist success.
+- `ports/notification_sender.py` + `adapters/osascript_notifier.py`:
+  display notification via osascript, no-op fallback.
+- `application/panic_service.py`: orchestriert alle 6 Schritte,
+  klobige Failures (notifier, killer, audit) werden geloggt
+  aber brechen die anderen Schritte nie. Idempotent.
+
+CommandHandler: `/panic` ohne PIN per Spec §5 (low friction in
+emergency). Reply mit Counts + Lockdown-Hinweis + /unlock-Tipp.
+Settings: neue Felder `panic_marker_path` + `heartbeat_path`
+(default `/tmp/whatsbot-PANIC`, `/tmp/whatsbot-heartbeat`).
+
+Tests: 29 (5 lockdown domain, 10 LockdownService, 9 PanicService,
+4 panic command, 1 e2e).
+
+#### C6.1 — `/stop` + `/kill` ✅
+
+Zwei per-Projekt emergency-control Verben. `KillService.stop`
+(Soft-Cancel via `tmux interrupt`, Session bleibt am Leben) +
+`KillService.kill` (Hard-Kill via `tmux kill_session` +
+`lock_service.release`). Lock-Release-Failures werden geloggt
+aber nie hochpropagiert. claude_sessions-Row bleibt bei /kill
+— Resume auf next /p ist intentional.
+
+- **`TmuxController.interrupt(name)`**-Protocol-Methode neu
+  (sendet `C-c` als tmux key event, kein Enter, kein -l-Literal).
+  Adapter + alle 5 FakeTmux-Varianten in den Tests aktualisiert.
+- **`application/kill_service.py`** mit `stop(name)` + `kill(name)`.
+- **`CommandHandler`** routet `/stop`, `/stop <name>`, `/kill`,
+  `/kill <name>`. Helper `_resolve_target_project` defaultet
+  auf aktives Projekt, validiert Name. Replies:
+  `🛑 Ctrl+C an '...' geschickt.` /
+  `🪓 '...' tmux-Session beendet · Lock freigegeben.`.
+
+Tests: 22 (9 KillService unit, 11 CommandHandler unit, 2 e2e).
+
 ### Phase 5 — Input-Lock + Multi-Session ✅ (complete)
 
 Alle 5 Checkpoints grün. Spec §7 Soft-Preemption + `/release` +

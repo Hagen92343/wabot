@@ -1,8 +1,8 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 6 — Kill-Switch + Watchdog + Sleep-Handling (in progress)
-**Aktiver Checkpoint**: **C6.5** (kosmetisch) ODER **C6.7** (edge-case polish) — siehe „Was noch offen"
-**Letzter abgeschlossener Checkpoint**: C6.6 (`/unlock <PIN>` + Lockdown-Filter + StartupRecovery respektiert Lockdown)
+**Aktive Phase**: Phase 6 abgeschlossen ✅ — wartet auf User-Freigabe für Phase 7
+**Aktiver Checkpoint**: — (Phase 6 inhaltlich + close-commit komplett)
+**Letzter abgeschlossener Checkpoint**: Phase-6-Close (CHANGELOG + Sammel-Commit)
 
 ## Phase 6 — laufender Stand (zum Wiederaufnehmen)
 
@@ -175,8 +175,32 @@
   - 1 e2e `test_unlock_e2e.py` (real tmux + signed /webhook):
     `/p` → `/panic` → blockierte Replies auf `/ls`/`/p`/bare-prompt
     → wrong PIN → right PIN → `/ls` funktioniert wieder.
+- ✅ **C6.5** — Watchdog Sleep-Awareness (PID-Liveness + Boot-Grace):
+  - **PID-Liveness-Grace** im `bin/watchdog.sh`: Heartbeat enthält
+    die Bot-PID (C6.4-Format `pid=<n>`). Wenn `kill -0 <pid>`
+    (echter no-op-signal-Test) lebt, war die Heartbeat-Staleness
+    wahrscheinlich Mac-Sleep-Artefakt — Bot war suspended, nicht
+    tot. Watchdog skippt engage und loggt `watchdog_grace_pid_alive`.
+  - **Boot-Grace**: System-Uptime via portable `sysctl
+    -n kern.boottime` (macOS) / `/proc/uptime` (Linux) /
+    `WHATSBOT_WATCHDOG_FAKE_UPTIME` (tests). Bei missing-heartbeat
+    + Uptime <`WHATSBOT_WATCHDOG_BOOT_GRACE_SECONDS` (default 300)
+    skippt der Watchdog (LaunchAgent könnte den Bot noch hochfahren).
+    Loggt `watchdog_grace_recent_boot`.
+  - Beide Pfade fallen sauber zu engage durch wenn die Heuristik
+    nicht greift (PID dead → engage, Uptime >grace + missing
+    heartbeat → engage).
+  - Plist exposed neue Env-Var
+    `WHATSBOT_WATCHDOG_BOOT_GRACE_SECONDS=300`.
+  - **Bonus-Fix in watchdog.sh**: pipeline-failures unter
+    `set -euo pipefail` mit `|| true` abgesichert (grep no-match
+    returns 1, würde sonst den ganzen Skript abbrechen).
+  - 5 neue Integration-Tests in `test_watchdog_script.py`:
+    PID-alive grace mit own-PID, dead-PID engaged, boot-grace
+    bei fake_uptime=10, no boot-grace bei fake_uptime=99999,
+    backwards-compat ohne pid= line.
 
-**Tests-Stand**: 1099/1099 passing (1077 + 22 C6.6-Tests).
+**Tests-Stand**: 1104/1104 passing (1099 + 5 C6.5-Tests).
 mypy `--strict` clean auf allen 93 source files, ruff clean auf
 allen angefassten Dateien.
 
@@ -185,32 +209,27 @@ allen angefassten Dateien.
 frische Sessions beide leeren session_id haben. Fix gehört in
 einen Phase-4-Cleanup-Commit (NULL statt empty oder UNIQUE drop).
 
-### Was noch offen in Phase 6
+### Phase 6 inhaltlich + close-commit komplett ✅
 
-- ⏭ **C6.5** — pmset Sleep/Wake-Handling. Aktuell triggert ein
-  langer Mac-Sleep den Watchdog einmal (Heartbeat wird stale).
-  Lockdown stoppt dann sauber alles bis zum `/unlock`. Akzeptabel
-  als kosmetisch/niedrig-prio — ein Sleep-Aware-Watchdog käme mit
-  pmset-event-Parsing oder einfacherem long-Threshold-Fallback.
-- ⏭ **C6.7** — Edge-Cases (StartupRecovery-Notice an Default-
-  Recipient bei Lockdown-Skip wäre nice-to-have; läßt sich auch
-  in Phase 8 unter Observability einreihen).
+Vier Eskalationsstufen vom Handy aus (`/stop`, `/kill`, `/panic`,
+`/unlock`), Heartbeat+Watchdog als unabhängiger Backstop,
+Sleep-Awareness, Lockdown-Filter, StartupRecovery respektiert
+Lockdown. C6.7 (StartupRecovery-Notice an Default-Recipient bei
+Lockdown-Skip) wird bewusst nach Phase 8 (Observability)
+verschoben.
 
-Mit **C6.6 fertig** ist die Kern-Notfall-Infrastruktur komplett:
-`/stop`, `/kill`, `/panic`, `/unlock`, Heartbeat+Watchdog,
-Lockdown-Filter, StartupRecovery-Lockdown-Respekt. Der Bot ist
-vom Handy aus jederzeit beherrschbar (vier Eskalationsstufen)
-und überlebt Crashes via Watchdog-Backstop.
-
-### Wie wiedereinsteigen
+### Wie für Phase 7 wiedereinsteigen
 
 1. Diese Datei lesen.
-2. `.claude/rules/phase-6.md` (Plan-Doc).
-3. `git log --oneline -18` für den Commit-Stand.
-4. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte 1099/1099 grün zeigen.
-5. Mit **C6.5** (kosmetisch) oder direkt **Phase-6-Close-Commit**
-   (CHANGELOG + Sammel-Commit) starten — beide Pfade legitim.
+2. `phases-3-to-9.md` Phase-7-Stub als Startpunkt
+   (Medien-Pipeline: Whisper, ffmpeg, Bilder, PDFs, Cache mit
+   Secure-Delete).
+3. **Vor dem Bauen**: `.claude/rules/phase-7.md` schreiben
+   (gleiche Struktur wie phase-6.md), User reviewen lassen,
+   *dann* erst implementieren.
+4. `git log --oneline -20` für den Commit-Stand bis Phase-6-Close.
+5. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
+   sollte 1104/1104 grün zeigen — Phase-7-Baseline.
 
 ## Phase 5 — laufender Stand (zum Wiederaufnehmen)
 
