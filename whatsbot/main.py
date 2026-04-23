@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
 import whatsbot
+from whatsbot.adapters.ffmpeg_audio_converter import FfmpegAudioConverter
 from whatsbot.adapters.file_heartbeat_writer import FileHeartbeatWriter
 from whatsbot.adapters.file_media_cache import FileMediaCache
 from whatsbot.adapters.keychain_provider import KeychainProvider
@@ -87,6 +88,7 @@ from whatsbot.http.hook_endpoint import build_router as build_hook_router
 from whatsbot.http.meta_webhook import build_router as build_webhook_router
 from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddleware
 from whatsbot.logging_setup import configure_logging, get_logger
+from whatsbot.ports.audio_converter import AudioConverter
 from whatsbot.ports.git_clone import GitClone
 from whatsbot.ports.heartbeat_writer import HeartbeatWriter
 from whatsbot.ports.media_cache import MediaCache
@@ -125,6 +127,7 @@ def create_app(
     enable_heartbeat: bool | None = None,
     media_downloader: MediaDownloader | None = None,
     media_cache: MediaCache | None = None,
+    audio_converter: AudioConverter | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -444,12 +447,25 @@ def create_app(
             if media_cache is not None
             else FileMediaCache(cache_dir=settings.media_cache_dir)
         )
+        # Phase 7 C7.3 — audio converter wired by default in
+        # prod/dev; tests inject a FakeAudioConverter when they
+        # exercise process_audio_to_wav. No wiring happens in TEST
+        # env when nothing is injected, so the image/pdf-only test
+        # suites don't gain an accidental dependency on ffmpeg.
+        audio_converter_impl: AudioConverter | None
+        if audio_converter is not None:
+            audio_converter_impl = audio_converter
+        elif settings.env is not Environment.TEST:
+            audio_converter_impl = FfmpegAudioConverter()
+        else:
+            audio_converter_impl = None
         if downloader_impl is not None:
             media_service = MediaService(
                 downloader=downloader_impl,
                 cache=cache_impl,
                 active_project=active_project,
                 session_service=session_service,
+                audio_converter=audio_converter_impl,
             )
 
     command_handler = CommandHandler(

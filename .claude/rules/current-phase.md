@@ -1,8 +1,9 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 7 — Medien-Pipeline
-**Aktiver Checkpoint**: **C7.3** — Audio-Pipeline (download + ffmpeg)
-**Letzter abgeschlossener Checkpoint**: **C7.2** — PDF-Pipeline
+**Aktiver Checkpoint**: **C7.4** — Whisper-Transkription + Audio-Send
+**Letzter abgeschlossener Checkpoint**: **C7.3** — Audio-Pipeline
+(Download + ffmpeg)
 **User-Freigabe für Phase 7**: ✅ erteilt
 
 ## Wie ich in der nächsten Session weitermache
@@ -10,7 +11,7 @@
 1. **Diese Datei lesen** — du bist hier.
 2. **`.claude/rules/phase-7.md` lesen** — Plan-Doc, vom User
    approved. Dort stehen die 5 Checkpoints + Architektur.
-3. `git log --oneline -26` für den Commit-Stand seit Phase 4 close.
+3. `git log --oneline -28` für den Commit-Stand seit Phase 4 close.
 4. Baseline-Tests grün stellen:
    ```bash
    venv/bin/pytest tests/unit/ tests/integration/ \
@@ -18,21 +19,28 @@
      --ignore=tests/integration/test_hook_script.py \
      --ignore=tests/integration/test_hook_fail_closed.py
    ```
-   Erwartung: **1245/1245 grün**, mypy --strict clean (100 source
-   files), ruff clean (bis auf pre-existing E731 in
-   `delete_service.py`).
-5. Mit **C7.3** anfangen — siehe `phase-7.md` Sektion „C7.3".
-   Für Audio kommt neu dazu:
-   - `ports/audio_converter.py` + `adapters/ffmpeg_audio_converter.py`
-     (OGG/Opus → WAV 16 kHz mono via `ffmpeg -i ... -ar 16000 -ac 1`).
-   - `MediaService.process_audio` als Stage-1 (Download →
-     Validate → Cache → Convert). Die Whisper-Transkription (C7.4)
-     hängt dann nur noch hinten dran.
-   - Sofort-Ack `🎙 Transkribiere…` aus dem Webhook, bevor die
-     Pipeline startet.
-   - Tests: 5 unit (Convert mit FakeFfmpeg + Failure-Containment),
-     1 integration (echter ffmpeg auf Test-Fixture, skipped wenn
-     ffmpeg fehlt).
+   Erwartung: **1264/1264 grün** (+ 1 skipped wenn ffmpeg fehlt),
+   mypy --strict clean (102 source files), ruff clean (bis auf
+   pre-existing E731 in `delete_service.py`).
+5. Mit **C7.4** anfangen — siehe `phase-7.md` Sektion „C7.4".
+   Für Whisper + Audio-Send kommt neu dazu:
+   - `ports/audio_transcriber.py` + `adapters/whisper_cpp_transcriber.py`
+     (Subprocess `whisper-cli -m <model> -l auto -f <wav> -nt -np`).
+   - `domain/transcription.py` mit `clean_transcript` (strip
+     Whisper-Header-Annotations, trim, truncate ≤ 4000 Zeichen).
+   - `MediaService.process_audio` = Stage-1 (C7.3) + Stage-2
+     (transkribiere → send_prompt). Gibt `MediaOutcome(kind="sent")`
+     zurück.
+   - `http/meta_webhook.py` dispatch AUDIO jetzt auf
+     `service.process_audio` statt `process_unsupported`. Sofort-Ack
+     `🎙 Transkribiere…` VOR der Pipeline (damit der User sieht, dass
+     wir es haben, bevor die 5-10s Whisper-Latenz zuschlägt).
+   - Settings: `whisper_binary` + `whisper_model_path` Defaults +
+     Fallback-Log-Warning wenn Modell fehlt.
+   - Tests: 6 unit für clean_transcript-Edge-Cases, MediaService
+     mit FakeWhisper für process_audio happy + transcribe-failure;
+     1 e2e optional (real ffmpeg + real whisper, `@pytest.mark.slow`
+     default skip in CI).
 
 ## Pre-existing Schuld (nicht-blockierend für Phase 7)
 

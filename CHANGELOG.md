@@ -7,6 +7,61 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 7 — Medien-Pipeline (in progress)
 
+#### C7.3 — Audio-Pipeline (Download + ffmpeg) ✅
+
+Voice-Messages (OGG/Opus, MP3, MP4, WAV, WebM) werden jetzt
+durch den Download/Validate/Cache-Pfad gezogen und mit ffmpeg
+auf 16 kHz Mono-WAV normalisiert. Damit steht die Stage-1-
+Infrastruktur — die eigentliche Transkription landet in C7.4.
+Der Webhook-Dispatcher routet AUDIO weiterhin auf
+`process_unsupported` (und ist aus Sicht des Users noch
+„nicht unterstützt"), bis Whisper in C7.4 das Prompt liefert.
+
+- **Port**: `AudioConverter`-Protocol + `AudioConversionError`
+  (`whatsbot/ports/audio_converter.py`). Kontrakt:
+  `to_wav_16k_mono(input_path, output_path)`.
+- **Adapter**: `FfmpegAudioConverter`
+  (`whatsbot/adapters/ffmpeg_audio_converter.py`) — shell-freier
+  `subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error",
+  "-y", "-i", ..., "-ar", "16000", "-ac", "1", "-f", "wav", ...])`.
+  30 s Timeout. stderr-Tail (letzte 500 Zeichen) im Error-Message,
+  auto-`mkdir -p` des Output-Parent-Dir, Sanity-Check auf
+  exit-0-with-empty-output.
+- **Application**: `MediaService.process_audio_to_wav(media_id,
+  mime, sender)` — Stage-1-Pipeline:
+  1. Guard auf aktives Projekt.
+  2. Download via MediaDownloader.
+  3. Validate MIME (audio/*-Allow-List), Size (25 MB Cap
+     per Spec §16), Magic-Bytes
+     (`domain.magic_bytes.looks_like_audio`).
+  4. Cache die Source-Blob unter Original-Suffix.
+  5. Konvertiere via AudioConverter → WAV im selben Cache-Dir.
+  6. Return `MediaOutcome(kind="audio_staged", wav_path=...)`.
+  Jeder Fehlermodus produziert einen eigenen `kind`-String
+  (no_active_project, download_failed, validation_failed,
+  conversion_failed) damit C7.4 sauber verzweigen kann.
+- **Wiring**: `main.py` baut `FfmpegAudioConverter` default in
+  prod/dev, injection via `create_app(audio_converter=...)` in
+  Tests. MediaService akzeptiert den Converter als optionalen
+  ctor-Param — fehlt er, fällt `process_audio_to_wav` fast-fail
+  auf `conversion_failed` zurück (ohne Download), damit ein
+  misskonfigurierter Bot nicht CPU verbrennt.
+- **Tests**: 10 unit (`test_media_service_audio.py`: happy path,
+  no_active_project, download failure, disallowed MIME, 26 MB
+  oversize, magic-bytes mismatch, ffmpeg-failure containment +
+  cached source überlebt, missing converter wiring, Graph-MIME
+  vs. Hint-Präferenz) + 9 unit (`test_ffmpeg_audio_converter.py`
+  mit Fake-ffmpeg auf PATH: happy, auto-mkdir, missing input,
+  non-zero exit mit stderr-tail, exit-0-but-empty, empty
+  written file, missing binary, timeout, argv-Schema) + 1
+  integration (`test_ffmpeg_real.py`: echter ffmpeg, OGG/Opus
+  Silence → 16 kHz mono WAV; RIFF/WAVE-Header und PCM/mono/16k-
+  Felder verifiziert; skipped wenn ffmpeg fehlt).
+
+**Tests**: 1264/1264 passing + 1 skipped (real-ffmpeg,
++19 vs. C7.2), mypy --strict clean auf 102 source files,
+ruff clean (bis auf pre-existing E731 in `delete_service.py`).
+
 #### C7.2 — PDF-Pipeline ✅
 
 PDFs landen jetzt genauso zuverlässig bei Claude wie Bilder.
