@@ -26,6 +26,9 @@ from whatsbot.adapters.sqlite_allow_rule_repository import (
 from whatsbot.adapters.sqlite_app_state_repository import (
     SqliteAppStateRepository,
 )
+from whatsbot.adapters.sqlite_claude_session_repository import (
+    SqliteClaudeSessionRepository,
+)
 from whatsbot.adapters.sqlite_pending_confirmation_repository import (
     SqlitePendingConfirmationRepository,
 )
@@ -38,6 +41,7 @@ from whatsbot.adapters.sqlite_pending_output_repository import (
 from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
 from whatsbot.adapters.sqlite_repo import open_state_db
 from whatsbot.adapters.subprocess_git_clone import SubprocessGitClone
+from whatsbot.adapters.tmux_subprocess import SubprocessTmuxController
 from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
 from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.allow_service import AllowService
@@ -47,6 +51,7 @@ from whatsbot.application.delete_service import DeleteService
 from whatsbot.application.hook_service import HookService
 from whatsbot.application.output_service import OutputService
 from whatsbot.application.project_service import ProjectService
+from whatsbot.application.session_service import SessionService
 from whatsbot.config import Environment, Settings, assert_secrets_present
 from whatsbot.domain import whitelist
 from whatsbot.http.hook_endpoint import build_router as build_hook_router
@@ -60,6 +65,7 @@ from whatsbot.ports.secrets_provider import (
     SecretNotFoundError,
     SecretsProvider,
 )
+from whatsbot.ports.tmux_controller import TmuxController
 
 _started_at_monotonic: Final[float] = time.monotonic()
 
@@ -71,6 +77,8 @@ def create_app(
     db_connection: sqlite3.Connection | None = None,
     git_clone: GitClone | None = None,
     projects_root: Path | None = None,
+    tmux_controller: TmuxController | None = None,
+    safe_claude_binary: str | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -165,6 +173,36 @@ def create_app(
         outputs_dir=outputs_dir,
     )
 
+    # Phase 4 — SessionService wires tmux + claude_sessions to /p.
+    # Constructed only when a TmuxController is available (prod) or
+    # injected (tests). Tests that don't exercise /p can omit the
+    # controller and the SessionService stays None.
+    tmux: TmuxController | None
+    if tmux_controller is not None:
+        tmux = tmux_controller
+    elif settings.env is not Environment.TEST:
+        tmux = SubprocessTmuxController()
+    else:
+        tmux = None
+
+    session_service: SessionService | None = None
+    if tmux is not None:
+        if safe_claude_binary is not None:
+            session_service = SessionService(
+                project_repo=project_repo,
+                session_repo=SqliteClaudeSessionRepository(conn),
+                tmux=tmux,
+                projects_root=projects_root,
+                safe_claude_binary=safe_claude_binary,
+            )
+        else:
+            session_service = SessionService(
+                project_repo=project_repo,
+                session_repo=SqliteClaudeSessionRepository(conn),
+                tmux=tmux,
+                projects_root=projects_root,
+            )
+
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
@@ -173,6 +211,7 @@ def create_app(
         version=whatsbot.__version__,
         started_at_monotonic=_started_at_monotonic,
         env=settings.env.value,
+        session_service=session_service,
     )
 
     app = FastAPI(

@@ -708,3 +708,122 @@ def test_rm_missing_panic_pin(
     result = h.handle("/rm alpha 1234")
     assert "⚠️" in result.reply
     assert "Panic-PIN" in result.reply
+
+
+# --- /p with session_service wiring (C4.1d) -------------------------------
+
+
+class _RecordingSessionService:
+    """Stand-in for SessionService that records ensure_started calls."""
+
+    def __init__(self, *, exc: Exception | None = None) -> None:
+        self.calls: list[str] = []
+        self._exc = exc
+
+    def ensure_started(self, project_name: str) -> None:
+        self.calls.append(project_name)
+        if self._exc is not None:
+            raise self._exc
+
+
+def _build_handler_with_session(
+    *,
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    trash_root: Path,
+    session_service: _RecordingSessionService,
+) -> CommandHandler:
+    project_repo = SqliteProjectRepository(conn)
+    project_service = ProjectService(
+        repository=project_repo,
+        conn=conn,
+        projects_root=projects_root,
+        git_clone=StubGitClone(),
+    )
+    allow_service = AllowService(
+        rule_repo=SqliteAllowRuleRepository(conn),
+        project_repo=project_repo,
+        projects_root=projects_root,
+    )
+    app_state_repo = SqliteAppStateRepository(conn)
+    active_project = ActiveProjectService(
+        app_state=app_state_repo,
+        projects=project_repo,
+    )
+    delete_service = DeleteService(
+        pending_repo=SqlitePendingDeleteRepository(conn),
+        project_repo=project_repo,
+        app_state=app_state_repo,
+        secrets=StubSecretsProvider(),
+        projects_root=projects_root,
+        trash_root=trash_root,
+    )
+    return CommandHandler(
+        project_service=project_service,
+        allow_service=allow_service,
+        active_project=active_project,
+        delete_service=delete_service,
+        version="0.1.0",
+        started_at_monotonic=time.monotonic(),
+        env="test",
+        session_service=session_service,  # type: ignore[arg-type]
+    )
+
+
+def test_p_triggers_ensure_started(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    session_service = _RecordingSessionService()
+    handler = _build_handler_with_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    handler.handle("/new alpha")
+    result = handler.handle("/p alpha")
+
+    assert result.command == "/p"
+    assert "alpha" in result.reply
+    assert "⚠️" not in result.reply  # no launch failure
+    assert session_service.calls == ["alpha"]
+
+
+def test_p_reports_launch_failure_but_keeps_active(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    from whatsbot.ports.tmux_controller import TmuxError
+
+    session_service = _RecordingSessionService(exc=TmuxError("no tmux"))
+    handler = _build_handler_with_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    handler.handle("/new alpha")
+    result = handler.handle("/p alpha")
+
+    assert "alpha" in result.reply
+    assert "⚠️" in result.reply  # surface the failure
+    # The active pointer still took effect so /p reflects it.
+    follow_up = handler.handle("/p")
+    assert "alpha" in follow_up.reply
+    assert session_service.calls == ["alpha"]
+
+
+def test_p_skips_session_service_when_project_invalid(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    session_service = _RecordingSessionService()
+    handler = _build_handler_with_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    # No /new — so "alpha" doesn't exist and set_active rejects.
+    result = handler.handle("/p alpha")
+    assert "⚠️" in result.reply
+    # ensure_started must NOT have been called for a non-existent project.
+    assert session_service.calls == []

@@ -1,8 +1,8 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 4 — Mode-System + Claude-Launch (in progress)
-**Aktiver Checkpoint**: **C4.1d** — SessionService.ensure_started + `/p`-Wiring + C4.1-Smoke
-**Letzter abgeschlossener Checkpoint**: C4.1c (TmuxController + Subprocess-Adapter)
+**Aktiver Checkpoint**: **C4.2** — Prompt-Roundtrip (Transcript-Watcher + on_turn_complete)
+**Letzter abgeschlossener Checkpoint**: C4.1d (SessionService.ensure_started + `/p`-Wiring)
 
 ## Phase 4 — laufender Stand (zum Wiederaufnehmen)
 
@@ -16,27 +16,19 @@
   `adapters/tmux_subprocess.py` (has_session / new_session /
   send_text / kill_session / list_sessions / set_status).
   Integration-Tests skippen wenn `tmux` fehlt.
-- ⏭ **C4.1d** — *nächster Schritt morgen*:
-  - `application/session_service.py` mit **`ensure_started(project)`** als
-    Minimal-Use-Case: mode aus projects-Tabelle, session row aus
-    `claude_sessions` (für `--resume`), `tmux new-session` +
-    `send_text("safe-claude ...")`, transcript_path persistieren sobald
-    Claude das Transcript-File erzeugt.
-  - `CommandHandler._handle_set_active` erweitern: `/p <name>` ruft
-    `session_service.ensure_started(name)` wenn noch keine Session
-    läuft. Status-Bar wird nach `modes.status_bar_color` + `mode_badge`
-    gesetzt.
-  - `main.py`-Wiring: `SubprocessTmuxController` +
-    `SqliteClaudeSessionRepository` + `SessionService` konstruieren.
-  - **Tests**:
-    - Unit: `SessionService.ensure_started` mit Fake-TmuxController +
-      In-Memory-Repo. Fälle: no-session-yet, session-running-already,
-      session-tot-neu-starten, mode aus projects lesen.
-    - Integration: End-to-end `/p <name>` via `/webhook` → tmux-Session
-      existiert → `claude_sessions`-Row befüllt. Skipped wenn `tmux`
-      oder `claude` fehlen. `safe-claude` wird mit injectable Binary
-      überschrieben; Default-Stub schreibt ein Transcript-JSONL und
-      exitiert, damit keine echte Claude-Subscription benötigt wird.
+- ✅ **C4.1d** — `domain/launch.py` (pure argv builder +
+  shell-safe render), `application/session_service.py` mit
+  `ensure_started(project)` (tmux + `claude_sessions` + Statusbar),
+  `CommandHandler` nimmt optionalen `SessionService` an und ruft
+  `ensure_started` aus `/p <name>` auf, `main.py` wired
+  `SubprocessTmuxController + SqliteClaudeSessionRepository +
+  SessionService` und akzeptiert für Tests injectable
+  `tmux_controller` + `safe_claude_binary`. Headless-Claude-Stub
+  in `tests/fixtures/headless_claude.py` für C4.2+.
+  Tests: 20 neue Unit-Tests (launch.py + session_service.py) + 3
+  neue Command-Handler-Tests (session wiring) + 2
+  Integration-Tests (`/p → tmux + claude_sessions` via `/webhook`,
+  skipped ohne tmux). mypy --strict clean, ruff clean.
 
 **Tests Stand**: 752/752 passing (+ 3 skipped wegen fehlendem tmux),
 mypy --strict clean, ruff clean. Commit-History:

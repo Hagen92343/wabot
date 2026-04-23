@@ -32,6 +32,7 @@ from whatsbot.application.project_service import (
     ProjectFilesystemError,
     ProjectService,
 )
+from whatsbot.application.session_service import SessionService
 from whatsbot.domain import commands
 from whatsbot.domain.allow_rules import (
     InvalidAllowRuleError,
@@ -49,6 +50,7 @@ from whatsbot.ports.project_repository import (
     ProjectAlreadyExistsError,
     ProjectNotFoundError,
 )
+from whatsbot.ports.tmux_controller import TmuxError
 
 _NEW_PREFIX: Final = "/new "
 _LS_COMMAND: Final = "/ls"
@@ -77,6 +79,7 @@ class CommandHandler:
         started_at_monotonic: float,
         env: str,
         db_ok_callback: Callable[[], bool] | None = None,
+        session_service: SessionService | None = None,
     ) -> None:
         self._projects = project_service
         self._allow = allow_service
@@ -86,6 +89,7 @@ class CommandHandler:
         self._started_at = started_at_monotonic
         self._env = env
         self._db_ok_callback = db_ok_callback
+        self._sessions = session_service
         self._log = get_logger("whatsbot.commands")
 
     # ---- entrypoint -------------------------------------------------------
@@ -220,8 +224,26 @@ class CommandHandler:
             return CommandResult(reply=f"⚠️ {exc}", command="/p")
         except ProjectNotFoundError as exc:
             return CommandResult(reply=f"⚠️ {exc} Tippe /ls fuer Liste.", command="/p")
+
+        # C4.1d: switching active project ensures the tmux session + Claude
+        # process are running. If session_service isn't wired (older tests,
+        # pre-Phase-4 paths) we just skip the launch and hand back the same
+        # reply as before. Failures are logged and surface as a warning
+        # suffix — the active pointer stays set so the user can /force or
+        # retry later.
+        suffix = ""
+        if self._sessions is not None:
+            try:
+                self._sessions.ensure_started(name)
+            except (TmuxError, FileNotFoundError, OSError) as exc:
+                self._log.error(
+                    "ensure_started_failed",
+                    project=name,
+                    error=str(exc),
+                )
+                suffix = "\n⚠️ Claude-Session konnte nicht gestartet werden."
         return CommandResult(
-            reply=f"▶ aktiv: {name}",
+            reply=f"▶ aktiv: {name}{suffix}",
             command="/p",
         )
 
