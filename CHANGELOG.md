@@ -7,6 +7,91 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 7 — Medien-Pipeline (in progress)
 
+#### C7.4 — Whisper-Transkription + Audio-Send ✅
+
+Voice-Messages gehen jetzt end-to-end vom Handy zu Claude: OGG
+herunterladen, mit ffmpeg auf 16 kHz mono WAV normalisieren,
+über whisper.cpp transkribieren, den Text bereinigen
+(`clean_transcript`) und als Prompt an das aktive Projekt
+senden. Der User bekommt sofort nach dem Empfang einen
+"🎙 Transkribiere…"-Ack, damit die 2-10 s Whisper-Latenz keine
+Verwirrung stiftet.
+
+- **Domain (pure)**: `domain/transcription.py` —
+  `clean_transcript` strippt Whisper-Bracket-Annotations
+  ([BLANK_AUDIO], [Music], [Laughter], …), entfernt
+  Timestamp-Prefixes (`[00:00:01.000 --> 00:00:04.500]`),
+  normalisiert Whitespace und trunkiert bei
+  `MAX_TRANSCRIPT_CHARS = 4000` mit `…`-Suffix. Pure-Funktion,
+  testbar ohne I/O.
+- **Port**: `AudioTranscriber`-Protocol + `TranscriptionError`
+  (`whatsbot/ports/audio_transcriber.py`). Kontrakt:
+  `transcribe(wav_path, language=None) -> str`. Sprache-Default
+  ist `None` (whisper autodetect), passt zum DE/EN-Mix auf dem
+  Bot-Handy.
+- **Adapter**: `WhisperCppTranscriber`
+  (`whatsbot/adapters/whisper_cpp_transcriber.py`) — shell-freier
+  Subprocess-Aufruf `whisper-cli -m <model> -l <lang|auto>
+  -f <wav> -nt -np -otxt -of <stem>`. Liest primär aus der
+  `<stem>.txt`-Ausgabe (vermeidet Info-Noise auf stdout), mit
+  stdout-Fallback für ältere whisper.cpp-Builds, die `-otxt`
+  ignorieren. 60 s Timeout (6x Spec §20 Budget). Fehlender
+  Binary oder Modell-File → klare `TranscriptionError`-Message.
+- **Application**: `MediaService.process_audio` = Stage-1
+  (`process_audio_to_wav` aus C7.3) + Stage-2 (transcribe →
+  clean_transcript → `SessionService.send_prompt`). Neue
+  Outcome-Kinds `transcription_failed` und `empty_transcript`
+  (whisper hat gelaufen aber keinen Text geliefert — reine
+  Stille / Hintergrundrauschen). Der Voice-Prompt durchläuft
+  den Spec-§9-Sanitize-Pfad in `send_prompt` automatisch —
+  Voice-Inhalte sind genauso untrusted wie geschriebene Prompts.
+- **HTTP**: `_dispatch_media` routet `MediaKind.AUDIO` jetzt
+  zu `process_audio` (nicht mehr `process_unsupported`). Der
+  POST-Handler sendet `"🎙 Transkribiere…"` VOR dem
+  dispatch — zwei Messages gehen raus (ack + final), in
+  dieser Reihenfolge. Der Ack läuft nur, wenn MediaService UND
+  `media_id` gesetzt sind, damit ein misskonfigurierter Bot
+  keinen Ack vor "⚠️ Medien werden gerade nicht angenommen"
+  sendet.
+- **Settings**: `whisper_binary` default `whisper-cli`,
+  `whisper_model_path` default
+  `~/Library/whisper-cpp/models/ggml-small.bin`. INSTALL.md-
+  Thema: die brew-Version von whisper.cpp bringt kein Modell
+  mit — User muss `./models/download-ggml-model.sh small`
+  einmal ausführen.
+- **Wiring**: `main.py` baut `WhisperCppTranscriber` default in
+  prod/dev, test-injectable via `create_app(audio_transcriber=
+  ...)`. Fehlendes Modell-File stoppt den Start NICHT — die
+  Adapter-Konstruktion loggt eine Warnung und der erste
+  Audio-Call fällt auf `transcription_failed` zurück; besser
+  als silent disable.
+- **Tests**: 28 unit für `clean_transcript`
+  (`test_transcription.py`: pass-through, whitespace,
+  non-string defensive, 11 Bracket-Annotation-Varianten,
+  timestamp-prefixes in 3 Formaten, non-annotation brackets
+  bleiben, blank-line collapse, per-line trim, Truncation-Edges).
+  8 unit für `MediaService.process_audio`
+  (`test_media_service_audio_e2e.py`: happy path,
+  stage-1-Failure-propagation (no_active_project,
+  download_failed, conversion_failed), transcription_failed,
+  unwired transcriber, empty_transcript für reinen
+  `[BLANK_AUDIO]`-Output, cleaned transcript reaches
+  send_prompt ohne Markup). 1 dispatcher-test
+  (`test_iter_media_audio_dispatch.py`: signed /webhook →
+  audio payload → genau 2 replies in Reihenfolge (ack +
+  📨-final), stub-MediaService empfängt media_id + mime +
+  sender korrekt).
+
+**Tests**: 1301/1301 passing + 1 skipped (ffmpeg-real),
++37 vs. C7.3. mypy --strict clean auf 105 source files,
+ruff clean (bis auf pre-existing E731 in `delete_service.py`).
+
+**Open**: C7.5 — Cache-Sweeper (TTL 7 Tage + 1 GB Cap).
+Real-whisper-e2e-Test (ffmpeg-Silence → whisper → empty_transcript)
+ist bewusst nicht gebaut, weil er ohne installed whisper-cli
+auf der Entwicklungsmaschine eh skippt und die FakeTranscriber-
+basierten Tests dieselbe Logik abdecken.
+
 #### C7.3 — Audio-Pipeline (Download + ffmpeg) ✅
 
 Voice-Messages (OGG/Opus, MP3, MP4, WAV, WebM) werden jetzt

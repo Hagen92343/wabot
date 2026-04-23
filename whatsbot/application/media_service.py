@@ -43,8 +43,10 @@ from whatsbot.domain.media import (
     validate_mime,
     validate_size,
 )
+from whatsbot.domain.transcription import clean_transcript
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.audio_converter import AudioConversionError, AudioConverter
+from whatsbot.ports.audio_transcriber import AudioTranscriber, TranscriptionError
 from whatsbot.ports.media_cache import MediaCache
 from whatsbot.ports.media_downloader import MediaDownloader, MediaDownloadError
 
@@ -90,12 +92,14 @@ class MediaService:
         active_project: ActiveProjectService,
         session_service: SessionService,
         audio_converter: AudioConverter | None = None,
+        audio_transcriber: AudioTranscriber | None = None,
     ) -> None:
         self._downloader = downloader
         self._cache = cache
         self._active = active_project
         self._sessions = session_service
         self._audio_converter = audio_converter
+        self._audio_transcriber = audio_transcriber
         self._log = get_logger("whatsbot.media")
 
     # ---- public API ---------------------------------------------------
@@ -122,6 +126,126 @@ class MediaService:
             sender=sender,
             magic_check=looks_like_pdf,
             prompt_builder=_build_pdf_prompt,
+        )
+
+    def process_audio(
+        self, *, media_id: str, mime: str | None, sender: str
+    ) -> MediaOutcome:
+        """Phase-7 C7.4 end-to-end — Stage 1 + transcribe + send.
+
+        Wraps :meth:`process_audio_to_wav` (Stage 1) with the
+        whisper-cli call (Stage 2) and the Claude prompt-forward. The
+        webhook layer sends a "🎙 Transkribiere…" ack before calling
+        this method so the user knows we received the voice note
+        before the 2-10 s transcription latency lands.
+
+        Failure modes propagate the Stage-1 ``kind`` as-is
+        (no_active_project, download_failed, validation_failed,
+        conversion_failed). Stage 2 adds:
+
+        * ``"transcription_failed"`` — whisper subprocess crashed or
+          the binary / model is missing.
+        * ``"empty_transcript"`` — whisper ran but produced no text
+          (pure silence or background noise only). The user sees a
+          hint rather than a mystery.
+
+        On success the prompt is sent via
+        :meth:`SessionService.send_prompt` and the method returns
+        ``MediaOutcome(kind="sent", ...)``. The injection sanitizer
+        in ``send_prompt`` wraps telegraph-triggers in
+        ``<untrusted_content>`` tags just like for text prompts —
+        voice is just as untrusted as WhatsApp text (Spec §9).
+        """
+        staged = self.process_audio_to_wav(
+            media_id=media_id, mime=mime, sender=sender
+        )
+        if staged.kind != "audio_staged":
+            return staged
+
+        # Invariant: staged==audio_staged ⇒ wav_path + project set.
+        assert staged.wav_path is not None
+        assert staged.project is not None
+        wav_path = staged.wav_path
+        project = staged.project
+
+        if self._audio_transcriber is None:
+            self._log.warning(
+                "audio_transcriber_missing",
+                project=project,
+                media_id=media_id,
+            )
+            return MediaOutcome(
+                kind="transcription_failed",
+                reply="⚠️ Transkription ist gerade nicht konfiguriert.",
+                project=project,
+                cache_path=staged.cache_path,
+                wav_path=wav_path,
+            )
+
+        try:
+            raw_transcript = self._audio_transcriber.transcribe(wav_path)
+        except TranscriptionError as exc:
+            self._log.warning(
+                "audio_transcription_failed",
+                project=project,
+                media_id=media_id,
+                reason=exc.reason,
+            )
+            return MediaOutcome(
+                kind="transcription_failed",
+                reply="⚠️ Transkription fehlgeschlagen. Bitte als Text.",
+                project=project,
+                cache_path=staged.cache_path,
+                wav_path=wav_path,
+            )
+
+        transcript = clean_transcript(raw_transcript)
+        if not transcript:
+            self._log.info(
+                "audio_empty_transcript",
+                project=project,
+                media_id=media_id,
+                raw_chars=len(raw_transcript),
+            )
+            return MediaOutcome(
+                kind="empty_transcript",
+                reply="⚠️ Kein Sprachinhalt erkannt. Bitte nochmal senden.",
+                project=project,
+                cache_path=staged.cache_path,
+                wav_path=wav_path,
+            )
+
+        try:
+            self._sessions.send_prompt(project, transcript)
+        except Exception as exc:  # pragma: no cover — defensive
+            self._log.warning(
+                "media_send_prompt_failed",
+                kind=MediaKind.AUDIO.value,
+                project=project,
+                error=str(exc),
+            )
+            return MediaOutcome(
+                kind="download_failed",
+                reply=f"⚠️ Prompt an '{project}' fehlgeschlagen: {exc}",
+                project=project,
+                cache_path=staged.cache_path,
+                wav_path=wav_path,
+            )
+
+        self._log.info(
+            "media_forwarded_to_claude",
+            kind=MediaKind.AUDIO.value,
+            project=project,
+            media_id=media_id,
+            transcript_chars=len(transcript),
+            wav_path=str(wav_path),
+        )
+        return MediaOutcome(
+            kind="sent",
+            reply=f"📨 Voice an '{project}' gesendet.",
+            project=project,
+            cache_path=staged.cache_path,
+            wav_path=wav_path,
         )
 
     def process_audio_to_wav(

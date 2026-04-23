@@ -1,9 +1,9 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 7 — Medien-Pipeline
-**Aktiver Checkpoint**: **C7.4** — Whisper-Transkription + Audio-Send
-**Letzter abgeschlossener Checkpoint**: **C7.3** — Audio-Pipeline
-(Download + ffmpeg)
+**Aktiver Checkpoint**: **C7.5** — Cache-Sweeper (TTL 7 Tage + 1 GB Cap)
+**Letzter abgeschlossener Checkpoint**: **C7.4** — Whisper-Transkription
++ Audio-Send (End-to-End)
 **User-Freigabe für Phase 7**: ✅ erteilt
 
 ## Wie ich in der nächsten Session weitermache
@@ -11,7 +11,7 @@
 1. **Diese Datei lesen** — du bist hier.
 2. **`.claude/rules/phase-7.md` lesen** — Plan-Doc, vom User
    approved. Dort stehen die 5 Checkpoints + Architektur.
-3. `git log --oneline -28` für den Commit-Stand seit Phase 4 close.
+3. `git log --oneline -30` für den Commit-Stand seit Phase 4 close.
 4. Baseline-Tests grün stellen:
    ```bash
    venv/bin/pytest tests/unit/ tests/integration/ \
@@ -19,28 +19,27 @@
      --ignore=tests/integration/test_hook_script.py \
      --ignore=tests/integration/test_hook_fail_closed.py
    ```
-   Erwartung: **1264/1264 grün** (+ 1 skipped wenn ffmpeg fehlt),
-   mypy --strict clean (102 source files), ruff clean (bis auf
+   Erwartung: **1301/1301 grün** (+ 1 skipped wenn ffmpeg fehlt),
+   mypy --strict clean (105 source files), ruff clean (bis auf
    pre-existing E731 in `delete_service.py`).
-5. Mit **C7.4** anfangen — siehe `phase-7.md` Sektion „C7.4".
-   Für Whisper + Audio-Send kommt neu dazu:
-   - `ports/audio_transcriber.py` + `adapters/whisper_cpp_transcriber.py`
-     (Subprocess `whisper-cli -m <model> -l auto -f <wav> -nt -np`).
-   - `domain/transcription.py` mit `clean_transcript` (strip
-     Whisper-Header-Annotations, trim, truncate ≤ 4000 Zeichen).
-   - `MediaService.process_audio` = Stage-1 (C7.3) + Stage-2
-     (transkribiere → send_prompt). Gibt `MediaOutcome(kind="sent")`
-     zurück.
-   - `http/meta_webhook.py` dispatch AUDIO jetzt auf
-     `service.process_audio` statt `process_unsupported`. Sofort-Ack
-     `🎙 Transkribiere…` VOR der Pipeline (damit der User sieht, dass
-     wir es haben, bevor die 5-10s Whisper-Latenz zuschlägt).
-   - Settings: `whisper_binary` + `whisper_model_path` Defaults +
-     Fallback-Log-Warning wenn Modell fehlt.
-   - Tests: 6 unit für clean_transcript-Edge-Cases, MediaService
-     mit FakeWhisper für process_audio happy + transcribe-failure;
-     1 e2e optional (real ffmpeg + real whisper, `@pytest.mark.slow`
-     default skip in CI).
+5. Mit **C7.5** anfangen — siehe `phase-7.md` Sektion „C7.5".
+   Für Cache-Sweeper kommt neu dazu:
+   - `domain/media_cache.py` — pure Konstanten
+     `CACHE_TTL_SECONDS = 7*86400`, `CACHE_MAX_BYTES = 1 GB`,
+     `is_expired(item, now, ttl)`, `select_for_eviction(items,
+     current_size, max_size)` — oldest-first.
+   - `application/media_sweeper.py` — async Loop analog zum
+     `HeartbeatPumper`: alle ~10 Min TTL-Sweep + Size-Cap-Sweep
+     gegen `MediaCache.list_all()` + `MediaCache.secure_delete`.
+     Failure-containment via Log-Only.
+   - `main.py` — MediaSweeper als FastAPI-Lifespan-Task,
+     `enable_media_sweeper`-Param (default ON in prod/dev,
+     opt-in in TEST).
+   - Tests: 5 unit für `select_for_eviction` (oldest-first,
+     under-cap no-op, empty list), 4 unit für `MediaSweeper`
+     (TTL-only, size-only, beide, failure-containment), 2
+     integration (real `secure_delete` schreibt Nullen + unlinkt,
+     Sweeper läuft im TestClient-Lifespan).
 
 ## Pre-existing Schuld (nicht-blockierend für Phase 7)
 

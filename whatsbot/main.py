@@ -26,6 +26,7 @@ from whatsbot.adapters.file_media_cache import FileMediaCache
 from whatsbot.adapters.keychain_provider import KeychainProvider
 from whatsbot.adapters.meta_media_downloader import MetaMediaDownloader
 from whatsbot.adapters.osascript_notifier import OsascriptNotifier
+from whatsbot.adapters.whisper_cpp_transcriber import WhisperCppTranscriber
 from whatsbot.adapters.redacting_sender import RedactingMessageSender
 from whatsbot.adapters.sqlite_allow_rule_repository import (
     SqliteAllowRuleRepository,
@@ -89,6 +90,7 @@ from whatsbot.http.meta_webhook import build_router as build_webhook_router
 from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddleware
 from whatsbot.logging_setup import configure_logging, get_logger
 from whatsbot.ports.audio_converter import AudioConverter
+from whatsbot.ports.audio_transcriber import AudioTranscriber
 from whatsbot.ports.git_clone import GitClone
 from whatsbot.ports.heartbeat_writer import HeartbeatWriter
 from whatsbot.ports.media_cache import MediaCache
@@ -128,6 +130,7 @@ def create_app(
     media_downloader: MediaDownloader | None = None,
     media_cache: MediaCache | None = None,
     audio_converter: AudioConverter | None = None,
+    audio_transcriber: AudioTranscriber | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -459,6 +462,24 @@ def create_app(
             audio_converter_impl = FfmpegAudioConverter()
         else:
             audio_converter_impl = None
+
+        # Phase 7 C7.4 — whisper transcriber wired default in
+        # prod/dev against the spec-§16 ``small`` multilingual
+        # model; tests inject a FakeAudioTranscriber. If the model
+        # file is missing we still build the adapter — it logs a
+        # warning at construction and fails at first transcribe
+        # with a clear error, which is better than silently
+        # disabling voice.
+        audio_transcriber_impl: AudioTranscriber | None
+        if audio_transcriber is not None:
+            audio_transcriber_impl = audio_transcriber
+        elif settings.env is not Environment.TEST:
+            audio_transcriber_impl = WhisperCppTranscriber(
+                model_path=settings.whisper_model_path,
+                whisper_binary=settings.whisper_binary,
+            )
+        else:
+            audio_transcriber_impl = None
         if downloader_impl is not None:
             media_service = MediaService(
                 downloader=downloader_impl,
@@ -466,6 +487,7 @@ def create_app(
                 active_project=active_project,
                 session_service=session_service,
                 audio_converter=audio_converter_impl,
+                audio_transcriber=audio_transcriber_impl,
             )
 
     command_handler = CommandHandler(

@@ -44,6 +44,13 @@ _DEFAULT_HEARTBEAT_PATH = Path("/tmp/whatsbot-heartbeat")  # noqa: S108 — Spec
 _DEFAULT_MEDIA_CACHE_DIR = (
     Path.home() / "Library" / "Caches" / "whatsbot" / "media"
 )
+# Phase 7 C7.4 — whisper.cpp via brew doesn't drop a model on disk,
+# the user runs `./models/download-ggml-model.sh small` to fetch it.
+# We default to the conventional brew-installed location; callers
+# override via Settings(whisper_model_path=...) or the env.
+_DEFAULT_WHISPER_MODEL_PATH = (
+    Path.home() / "Library" / "whisper-cpp" / "models" / "ggml-small.bin"
+)
 
 
 class Settings(BaseModel):
@@ -57,6 +64,10 @@ class Settings(BaseModel):
     panic_marker_path: Path = Field(default_factory=lambda: _DEFAULT_PANIC_MARKER)
     heartbeat_path: Path = Field(default_factory=lambda: _DEFAULT_HEARTBEAT_PATH)
     media_cache_dir: Path = Field(default_factory=lambda: _DEFAULT_MEDIA_CACHE_DIR)
+    whisper_binary: str = "whisper-cli"
+    whisper_model_path: Path = Field(
+        default_factory=lambda: _DEFAULT_WHISPER_MODEL_PATH
+    )
     bind_host: str = "127.0.0.1"
     bind_port: int = 8000
     hook_bind_host: str = "127.0.0.1"

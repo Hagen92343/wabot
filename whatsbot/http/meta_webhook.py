@@ -411,6 +411,20 @@ def build_router(
                 if not whitelist.is_allowed(media.sender, allowed):
                     log.warning("sender_not_allowed")
                     continue
+                # Spec §9 + §20 — voice notes take 2-10 s to
+                # transcribe. Send an immediate ack so the user
+                # knows we received the voice before whisper lands.
+                # Only when the full audio path is wired (service
+                # + downloadable media_id) — a misconfigured bot
+                # would show ack + "not configured" otherwise.
+                if (
+                    media.kind is MediaKind.AUDIO
+                    and media_service is not None
+                    and media.media_id is not None
+                ):
+                    sender.send_text(
+                        to=media.sender, body="🎙 Transkribiere…"
+                    )
                 media_reply = _dispatch_media(media, media_service)
                 if media_reply is not None:
                     sender.send_text(to=media.sender, body=media_reply)
@@ -491,8 +505,15 @@ def _dispatch_media(
             sender=media.sender,
         )
         return outcome.reply
-    # AUDIO — fully wired in C7.4; until then we treat it as a reject
-    # so the user isn't left wondering whether anything happened.
+    if media.kind is MediaKind.AUDIO:
+        outcome = service.process_audio(
+            media_id=media.media_id,
+            mime=media.mime,
+            sender=media.sender,
+        )
+        return outcome.reply
+    # Defensive — a new SUPPORTED_KINDS member without a branch here
+    # would otherwise silently fall through. Reject until wired.
     return service.process_unsupported(media.kind).reply
 
 
