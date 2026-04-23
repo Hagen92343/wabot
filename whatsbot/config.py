@@ -39,6 +39,11 @@ _DEFAULT_BACKUP_DIR = Path.home() / "Backups" / "whatsbot"
 # never survives across power cycles.
 _DEFAULT_PANIC_MARKER = Path("/tmp/whatsbot-PANIC")  # noqa: S108 — Spec §4 path
 _DEFAULT_HEARTBEAT_PATH = Path("/tmp/whatsbot-heartbeat")  # noqa: S108 — Spec §4 path
+# Phase 7 (§4, §16) — on-disk media cache under User Caches so Spotlight /
+# Time Machine skip it by default, TTL 7 days, 1 GB size cap.
+_DEFAULT_MEDIA_CACHE_DIR = (
+    Path.home() / "Library" / "Caches" / "whatsbot" / "media"
+)
 
 
 class Settings(BaseModel):
@@ -51,6 +56,7 @@ class Settings(BaseModel):
     backup_dir: Path = Field(default_factory=lambda: _DEFAULT_BACKUP_DIR)
     panic_marker_path: Path = Field(default_factory=lambda: _DEFAULT_PANIC_MARKER)
     heartbeat_path: Path = Field(default_factory=lambda: _DEFAULT_HEARTBEAT_PATH)
+    media_cache_dir: Path = Field(default_factory=lambda: _DEFAULT_MEDIA_CACHE_DIR)
     bind_host: str = "127.0.0.1"
     bind_port: int = 8000
     hook_bind_host: str = "127.0.0.1"

@@ -16,3 +16,9 @@ python-multipart==0.0.*
 # Uses FSEvents on macOS; falls back to polling for filesystems
 # that can't deliver native change notifications.
 watchdog==6.0.*
+
+# Phase 7 (C7.1): Meta WhatsApp media download via Graph API
+# (two-step fetch). Already pulled in transitively by fastapi's
+# TestClient; pinned here so the runtime doesn't depend on an
+# accidental upstream pin changing.
+httpx==0.27.*

@@ -1,16 +1,16 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 7 — Medien-Pipeline (Plan-Doc liegt vor, Code noch nicht begonnen)
-**Aktiver Checkpoint**: **C7.1** — Image-Pipeline + Reject-Pfade
-**Letzter abgeschlossener Checkpoint**: Phase-6-Close + Phase-7-Plan-Doc (`37490ef`)
-**User-Freigabe für Phase 7**: ✅ erteilt (in vorheriger Session)
+**Aktive Phase**: Phase 7 — Medien-Pipeline
+**Aktiver Checkpoint**: **C7.2** — PDF-Pipeline (Magic-Bytes + 20 MB-Cap)
+**Letzter abgeschlossener Checkpoint**: **C7.1** — Image-Pipeline + Reject-Pfade
+**User-Freigabe für Phase 7**: ✅ erteilt
 
 ## Wie ich in der nächsten Session weitermache
 
 1. **Diese Datei lesen** — du bist hier.
 2. **`.claude/rules/phase-7.md` lesen** — Plan-Doc, vom User
    approved. Dort stehen die 5 Checkpoints + Architektur.
-3. `git log --oneline -22` für den Commit-Stand seit Phase 4 close.
+3. `git log --oneline -24` für den Commit-Stand seit Phase 4 close.
 4. Baseline-Tests grün stellen:
    ```bash
    venv/bin/pytest tests/unit/ tests/integration/ \
@@ -18,23 +18,16 @@
      --ignore=tests/integration/test_hook_script.py \
      --ignore=tests/integration/test_hook_fail_closed.py
    ```
-   Erwartung: **1104/1104 grün**, mypy --strict clean (93 source
-   files), ruff clean.
-5. Mit **C7.1** anfangen — siehe `phase-7.md` Sektion „C7.1".
-   Bottom-up bauen:
-   - `domain/media.py` (MediaKind, MAX_BYTES, ALLOWED_MIMES,
-     validate_*, MediaValidationError)
-   - `domain/magic_bytes.py` (looks_like_image, looks_like_pdf,
-     looks_like_audio)
-   - `ports/media_downloader.py` + `ports/media_cache.py`
-   - `adapters/meta_media_downloader.py` (httpx, 2-step Meta-API)
-   - `adapters/file_media_cache.py` (atomic store + secure_delete)
-   - `application/media_service.py` (process_image,
-     process_unsupported)
-   - `http/meta_webhook.py` (`iter_media_messages` +
-     dispatch + reject-replies)
-   - `main.py` Wiring
-   - Tests pro Layer + 1 e2e
+   Erwartung: **1236/1236 grün**, mypy --strict clean (100 source
+   files), ruff clean (bis auf pre-existing E731 in
+   `delete_service.py`).
+5. Mit **C7.2** anfangen — siehe `phase-7.md` Sektion „C7.2".
+   Der PDF-Pfad ist zu ~90 % schon da: `MediaService.process_pdf`
+   existiert bereits (stub), `looks_like_pdf` ist pure,
+   `suffix_for_mime(DOCUMENT, "application/pdf") == ".pdf"`, und
+   der HTTP-Layer routet DOCUMENT schon an `process_pdf`. Offen
+   sind: end-to-end-Test mit PDF-Payload, ggf. Edge-Case-Tests
+   für 20 MB-Cap / magic-bytes-mismatch / ohne caption.
 
 ## Pre-existing Schuld (nicht-blockierend für Phase 7)
 

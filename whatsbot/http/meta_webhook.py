@@ -35,10 +35,12 @@ from fastapi.responses import PlainTextResponse
 
 from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
+from whatsbot.application.media_service import MediaService
 from whatsbot.application.output_service import OutputService, ResolveOutcome
 from whatsbot.config import Environment, Settings
 from whatsbot.domain import whitelist
 from whatsbot.domain.injection import detect_triggers
+from whatsbot.domain.media import SUPPORTED_KINDS, MediaKind, classify_meta_kind
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.message_sender import MessageSender
 from whatsbot.ports.secrets_provider import (
@@ -129,6 +131,104 @@ def iter_text_messages(payload: dict[str, object]) -> Iterator[TextMessage]:
                 yield TextMessage(sender=sender, text=body, msg_id=str(msg_id))
 
 
+@dataclass(frozen=True, slots=True)
+class MediaMessage:
+    """One inbound WhatsApp non-text message.
+
+    ``media_id`` is ``None`` for kinds that don't carry a downloadable
+    blob (location, contact) — the webhook still surfaces them so the
+    user gets a reject reply instead of a silent drop.
+    ``mime`` comes from Meta and is validated defensively in the
+    application layer.
+    """
+
+    sender: str
+    kind: MediaKind
+    msg_id: str
+    media_id: str | None = None
+    mime: str | None = None
+    caption: str | None = None
+
+
+def iter_media_messages(payload: dict[str, object]) -> Iterator[MediaMessage]:
+    """Yield each non-text message from a Meta WhatsApp webhook payload.
+
+    Mirrors the structure of :func:`iter_text_messages` but handles the
+    full set of Phase-7 kinds. Unknown kinds yield with
+    :attr:`MediaKind.UNKNOWN` so the dispatcher can reply with a
+    friendly reject rather than crash on a new Meta message type.
+    """
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for change in entry.get("changes", []) or []:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            for message in value.get("messages", []) or []:
+                if not isinstance(message, dict):
+                    continue
+                meta_type = message.get("type")
+                if meta_type == "text":
+                    continue  # handled by iter_text_messages
+                sender = message.get("from")
+                if not isinstance(sender, str):
+                    continue
+                kind = classify_meta_kind(
+                    meta_type if isinstance(meta_type, str) else None
+                )
+                msg_id = str(message.get("id", ""))
+                media_id, mime, caption = _extract_media_fields(message, kind)
+                yield MediaMessage(
+                    sender=sender,
+                    kind=kind,
+                    msg_id=msg_id,
+                    media_id=media_id,
+                    mime=mime,
+                    caption=caption,
+                )
+
+
+def _extract_media_fields(
+    message: dict[str, object], kind: MediaKind
+) -> tuple[str | None, str | None, str | None]:
+    """Pull ``(media_id, mime, caption)`` from the per-kind sub-object.
+
+    Meta puts the actual media metadata under the type name:
+    ``message["image"] = {"id": "...", "mime_type": "...", "caption": "..."}``.
+    Missing fields → ``None`` at that position; the dispatcher handles
+    the nulls gracefully.
+    """
+    # Kinds without a downloadable blob: nothing under the type name
+    # we care about, or the shape is different (location, contacts).
+    if kind in {MediaKind.LOCATION, MediaKind.CONTACT, MediaKind.UNKNOWN}:
+        return None, None, None
+    payload_key = {
+        MediaKind.IMAGE: "image",
+        MediaKind.AUDIO: "audio",
+        MediaKind.DOCUMENT: "document",
+        MediaKind.VIDEO: "video",
+        MediaKind.STICKER: "sticker",
+    }.get(kind)
+    if payload_key is None:
+        return None, None, None
+    sub = message.get(payload_key)
+    if not isinstance(sub, dict):
+        return None, None, None
+    raw_id = sub.get("id")
+    raw_mime = sub.get("mime_type")
+    raw_caption = sub.get("caption")
+    media_id = raw_id if isinstance(raw_id, str) and raw_id else None
+    mime = raw_mime if isinstance(raw_mime, str) and raw_mime else None
+    caption = raw_caption if isinstance(raw_caption, str) and raw_caption else None
+    return media_id, mime, caption
+
+
 # --- Router factory ---------------------------------------------------------
 
 
@@ -140,6 +240,7 @@ def build_router(
     command_handler: CommandHandler,
     coordinator: ConfirmationCoordinator | None = None,
     output_service: OutputService | None = None,
+    media_service: MediaService | None = None,
 ) -> APIRouter:
     """Construct the ``/webhook`` APIRouter with the dependencies wired in.
 
@@ -301,6 +402,21 @@ def build_router(
             finally:
                 structlog.contextvars.unbind_contextvars("wa_msg_id", "sender")
 
+        # --- non-text messages (images, pdf, audio, rejects) ---
+        for media in iter_media_messages(payload):
+            structlog.contextvars.bind_contextvars(
+                wa_msg_id=media.msg_id, sender=media.sender
+            )
+            try:
+                if not whitelist.is_allowed(media.sender, allowed):
+                    log.warning("sender_not_allowed")
+                    continue
+                media_reply = _dispatch_media(media, media_service)
+                if media_reply is not None:
+                    sender.send_text(to=media.sender, body=media_reply)
+            finally:
+                structlog.contextvars.unbind_contextvars("wa_msg_id", "sender")
+
         return Response(status_code=status.HTTP_200_OK)
 
     return router
@@ -333,3 +449,57 @@ def _format_output_outcome(outcome: ResolveOutcome, action: str) -> str:
         return "💾 Gespeichert (nur auf der Platte)."
     # Defensive — future-proof if ResolveKind grows.
     return f"OK ({action}: {outcome.kind})"
+
+
+def _dispatch_media(
+    media: MediaMessage, service: MediaService | None
+) -> str | None:
+    """Route one inbound media message to the :class:`MediaService`.
+
+    Returns the user-facing reply text, or ``None`` if the message was
+    handled silently (shouldn't happen for C7.1 — every kind produces
+    a reply). Unsupported kinds fall through to ``process_unsupported``
+    even when ``service`` is ``None`` because those replies are cheap
+    and we want to tell the sender regardless.
+    """
+    # Unsupported kinds never need a service — we answer from a static
+    # map. Route them here so a misconfigured bot still replies.
+    if media.kind not in SUPPORTED_KINDS:
+        if service is None:
+            return _STATIC_UNSUPPORTED_REPLY.get(
+                media.kind, _STATIC_UNSUPPORTED_REPLY[MediaKind.UNKNOWN]
+            )
+        return service.process_unsupported(media.kind).reply
+
+    # Supported kinds need a real service + a downloadable media_id.
+    if service is None:
+        return "⚠️ Medien werden gerade nicht angenommen."
+    if media.media_id is None:
+        return "⚠️ Medien-ID fehlt, bitte noch einmal schicken."
+
+    if media.kind is MediaKind.IMAGE:
+        outcome = service.process_image(
+            media_id=media.media_id,
+            caption=media.caption,
+            sender=media.sender,
+        )
+        return outcome.reply
+    if media.kind is MediaKind.DOCUMENT:
+        outcome = service.process_pdf(
+            media_id=media.media_id,
+            caption=media.caption,
+            sender=media.sender,
+        )
+        return outcome.reply
+    # AUDIO — fully wired in C7.4; until then we treat it as a reject
+    # so the user isn't left wondering whether anything happened.
+    return service.process_unsupported(media.kind).reply
+
+
+_STATIC_UNSUPPORTED_REPLY: Final[dict[MediaKind, str]] = {
+    MediaKind.VIDEO: "🎬 Video wird nicht unterstützt, bitte Screenshot.",
+    MediaKind.LOCATION: "📍 Location-Pins werden ignoriert.",
+    MediaKind.STICKER: "😄 Nice sticker, aber ich brauche Text/Voice.",
+    MediaKind.CONTACT: "📇 Kontaktkarten werden ignoriert.",
+    MediaKind.UNKNOWN: "⚠️ Dieser Nachrichtentyp wird nicht unterstützt.",
+}

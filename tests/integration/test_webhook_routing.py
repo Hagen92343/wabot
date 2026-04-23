@@ -192,11 +192,18 @@ def test_unknown_sender_is_silently_dropped() -> None:
     assert sender.sent == []
 
 
-def test_non_text_message_does_not_dispatch_a_reply() -> None:
+def test_image_without_active_project_prompts_user_to_set_one() -> None:
+    # Phase 7 C7.1 — images are now routed through MediaService. When
+    # no project is active, the bot replies with a hint rather than
+    # silently dropping (Spec §9 requires friendly reject replies on
+    # media so the sender isn't left wondering).
     client, sender = _make_client()
     response = _signed_post(client, "meta_non_text")
     assert response.status_code == 200
-    assert sender.sent == []
+    assert len(sender.sent) == 1
+    to, body = sender.sent[0]
+    assert to == ALLOWED_SENDER
+    assert "/p" in body  # hint to set an active project
 
 
 def test_invalid_signature_silently_drops_request() -> None:

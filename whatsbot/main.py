@@ -21,7 +21,9 @@ from fastapi.responses import PlainTextResponse
 
 import whatsbot
 from whatsbot.adapters.file_heartbeat_writer import FileHeartbeatWriter
+from whatsbot.adapters.file_media_cache import FileMediaCache
 from whatsbot.adapters.keychain_provider import KeychainProvider
+from whatsbot.adapters.meta_media_downloader import MetaMediaDownloader
 from whatsbot.adapters.osascript_notifier import OsascriptNotifier
 from whatsbot.adapters.redacting_sender import RedactingMessageSender
 from whatsbot.adapters.sqlite_allow_rule_repository import (
@@ -70,6 +72,7 @@ from whatsbot.application.hook_service import HookService
 from whatsbot.application.kill_service import KillService
 from whatsbot.application.lock_service import LockService
 from whatsbot.application.lockdown_service import LockdownService
+from whatsbot.application.media_service import MediaService
 from whatsbot.application.mode_service import ModeService
 from whatsbot.application.output_service import OutputService
 from whatsbot.application.panic_service import PanicService
@@ -86,11 +89,14 @@ from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddle
 from whatsbot.logging_setup import configure_logging, get_logger
 from whatsbot.ports.git_clone import GitClone
 from whatsbot.ports.heartbeat_writer import HeartbeatWriter
+from whatsbot.ports.media_cache import MediaCache
+from whatsbot.ports.media_downloader import MediaDownloader
 from whatsbot.ports.message_sender import MessageSender
 from whatsbot.ports.notification_sender import NotificationSender
 from whatsbot.ports.process_killer import ProcessKiller
 from whatsbot.ports.secrets_provider import (
     KEY_ALLOWED_SENDERS,
+    KEY_META_ACCESS_TOKEN,
     SecretNotFoundError,
     SecretsProvider,
 )
@@ -117,6 +123,8 @@ def create_app(
     notifier: NotificationSender | None = None,
     heartbeat_writer: HeartbeatWriter | None = None,
     enable_heartbeat: bool | None = None,
+    media_downloader: MediaDownloader | None = None,
+    media_cache: MediaCache | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -406,6 +414,44 @@ def create_app(
         secrets=secrets_for_router,
     )
 
+    # Phase 7 C7.1 — MediaService handles image/pdf/audio inbound
+    # messages. Needs SessionService to forward Claude prompts, so it
+    # is only built when Claude is actually launchable (tmux present).
+    # Unsupported-kind replies (video/location/sticker/contact) still
+    # work even without a MediaService — the webhook has a static
+    # fallback map.
+    media_service: MediaService | None = None
+    if session_service is not None:
+        # Downloader: tests inject a fake. In prod/dev we build the
+        # real Meta Graph adapter from the Keychain access token.
+        # Missing token leaves media_service None so inbound media
+        # replies with a friendly "Medien werden gerade nicht
+        # angenommen" fallback instead of crashing.
+        downloader_impl: MediaDownloader | None
+        if media_downloader is not None:
+            downloader_impl = media_downloader
+        else:
+            try:
+                access_token = secrets_for_router.get(KEY_META_ACCESS_TOKEN)
+            except SecretNotFoundError:
+                access_token = ""
+            if access_token:
+                downloader_impl = MetaMediaDownloader(access_token=access_token)
+            else:
+                downloader_impl = None
+        cache_impl: MediaCache = (
+            media_cache
+            if media_cache is not None
+            else FileMediaCache(cache_dir=settings.media_cache_dir)
+        )
+        if downloader_impl is not None:
+            media_service = MediaService(
+                downloader=downloader_impl,
+                cache=cache_impl,
+                active_project=active_project,
+                session_service=session_service,
+            )
+
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
@@ -471,6 +517,7 @@ def create_app(
             command_handler=command_handler,
             coordinator=coordinator,
             output_service=output_service,
+            media_service=media_service,
         )
     )
     # Stash the coordinator on the app state so ``create_hook_app``
@@ -482,6 +529,7 @@ def create_app(
     # Exposed for tests that need to drive lifecycle ops from outside
     # the webhook flow (e.g. stop_transcript_watch on teardown).
     app.state.session_service = session_service
+    app.state.media_service = media_service
 
     # Phase 4 C4.6 + C4.7 — StartupRecovery coerces YOLO → Normal
     # (Spec §6 invariant) and calls ensure_started for every row in

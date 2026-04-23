@@ -5,6 +5,67 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
+### Phase 7 — Medien-Pipeline (in progress)
+
+#### C7.1 — Image-Pipeline + Reject-Pfade ✅
+
+Inbound WhatsApp-Images, -PDFs (Gerüst) und unsupportete Kinds
+(Video/Location/Sticker/Contact) fließen durchs MetaWebhook in den
+neuen `MediaService`. Bilder werden per Meta Graph API (zwei
+Schritte + Bearer) gezogen, magic-bytes- + MIME- + Size-validiert,
+atomar in `~/Library/Caches/whatsbot/media/` abgelegt und als
+`analysiere <path>: <caption>`-Prompt an das aktive Projekt
+weitergereicht. Unsupportete Kinds bekommen freundliche
+Reject-Replies (Spec §9 — kein silent drop mehr).
+
+- **Domain (pure)**: `domain/media.py` (MediaKind, Size/MIME-
+  Allow-Lists, MediaValidationError, classify_meta_kind,
+  suffix_for_mime), `domain/magic_bytes.py` (looks_like_image
+  für JPEG/PNG/WEBP/HEIC/GIF, looks_like_pdf, looks_like_audio
+  für OGG/MP3/MP4/WAV/WebM).
+- **Ports**: `MediaDownloader`-Protocol (DownloadedMedia +
+  MediaDownloadError), `MediaCache`-Protocol (CachedItem +
+  store/path_for/list_all/secure_delete).
+- **Adapter**: `MetaMediaDownloader` (httpx, tenacity-Retries,
+  5s connect + 30s read, 4xx = permanent, 5xx = retry),
+  `FileMediaCache` (atomic `<name>.tmp` + `os.replace`,
+  secure_delete = zeros + fsync + unlink, media_id-Sanitize
+  gegen Path-Traversal).
+- **Application**: `MediaService` mit `process_image`,
+  `process_pdf` (Stub für C7.2) und `process_unsupported`.
+  Strukturierte `MediaOutcome` mit kind-Kategorie (sent,
+  no_active_project, validation_failed, download_failed,
+  unsupported).
+- **HTTP**: `iter_media_messages` + `MediaMessage`-Dataclass
+  analog zu `iter_text_messages`, neuer Dispatch-Loop im
+  POST-Handler der Video/Location/Sticker/Contact/Unknown
+  mit friendly-reject replies beantwortet.
+- **Wiring**: `MediaService` wird in `main.py` nur gebaut wenn
+  `tmux + session_service + access_token` da sind; fehlende
+  Voraussetzungen fallen auf "Medien gerade nicht angenommen"
+  (statisch) bzw. static reject replies zurück. `Settings`
+  bekommt `media_cache_dir` (default
+  `~/Library/Caches/whatsbot/media/`).
+- **Tests**: 73 unit (domain), 10 unit
+  (MetaMediaDownloader mit httpx-MockTransport), 14 unit
+  (FileMediaCache), 15 unit (MediaService), 14 unit
+  (iter_media_messages), 2 e2e (real tmux + signed /webhook:
+  image happy path, video reject). 1 pre-existing
+  integration-test aktualisiert (C7.1 ändert bewusst das
+  silent-drop-Verhalten für non-text messages auf
+  friendly reply pro Spec §9).
+
+**Tests**: 1236/1236 passing (+132 vs. Phase-6-Baseline),
+mypy --strict clean auf 100 source files (+7), ruff clean
+(bis auf pre-existing E731 in `delete_service.py`).
+
+**Open Debt (für spätere Checkpoints)**:
+- `MediaService.process_pdf` Stub → C7.2 real e2e + edge tests.
+- Audio/Voice-Pipeline → C7.3 (ffmpeg) + C7.4 (whisper).
+- Cache-Sweeper (TTL 7d + 1 GB-Cap) → C7.5.
+- httpx explicit in `requirements.txt` aufgenommen (war
+  bereits transitive via FastAPI, jetzt gepinnt).
+
 ### Phase 6 — Kill-Switch + Watchdog + Sleep-Handling ✅ (complete)
 
 Alle Kern-Checkpoints grün (C6.1–C6.6) plus optional C6.5 Sleep-
