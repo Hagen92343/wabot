@@ -70,10 +70,12 @@ class LockService:
         repo: SessionLockRepository,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         timeout_seconds: int = LOCK_TIMEOUT_SECONDS,
+        on_owner_change: Callable[[str], None] | None = None,
     ) -> None:
         self._repo = repo
         self._clock = clock
         self._timeout_s = timeout_seconds
+        self._on_owner_change = on_owner_change
         self._log = get_logger("whatsbot.locks")
 
     # ---- bot-side operations -----------------------------------------
@@ -102,11 +104,14 @@ class LockService:
             project=project_name,
             outcome=outcome.value,
         )
+        if current is None or current.owner is not new_state.owner:
+            self._notify_owner_change(project_name)
         return AcquireResult(outcome=outcome, lock=new_state)
 
     def force_bot(self, project_name: str) -> SessionLock:
         """Unconditional bot acquire — used by ``/force`` (PIN-gated)."""
         now = self._clock()
+        previous = self._repo.get(project_name)
         new_state = SessionLock(
             project_name=project_name,
             owner=LockOwner.BOT,
@@ -117,6 +122,8 @@ class LockService:
         self._log.warning(
             "lock_forced_for_bot", project=project_name
         )
+        if previous is None or previous.owner is not LockOwner.BOT:
+            self._notify_owner_change(project_name)
         return new_state
 
     # ---- observer-side operations ------------------------------------
@@ -138,6 +145,7 @@ class LockService:
                     current.owner.value if current is not None else "none"
                 ),
             )
+            self._notify_owner_change(project_name)
         return new_state
 
     # ---- release / sweep --------------------------------------------
@@ -149,6 +157,7 @@ class LockService:
         removed = self._repo.delete(project_name)
         if removed:
             self._log.info("lock_released", project=project_name)
+            self._notify_owner_change(project_name)
         return removed
 
     def sweep_expired(self) -> list[str]:
@@ -162,7 +171,29 @@ class LockService:
                 reaped.append(lock.project_name)
         if reaped:
             self._log.info("lock_sweep_reaped", projects=reaped)
+            for name in reaped:
+                self._notify_owner_change(name)
         return reaped
+
+    # ---- internals ---------------------------------------------------
+
+    def _notify_owner_change(self, project_name: str) -> None:
+        """Fire the on_owner_change callback, swallowing exceptions.
+
+        The callback drives a tmux status-bar repaint — purely
+        cosmetic, so a failure here must never break the underlying
+        lock operation.
+        """
+        if self._on_owner_change is None:
+            return
+        try:
+            self._on_owner_change(project_name)
+        except Exception as exc:
+            self._log.warning(
+                "lock_owner_change_callback_failed",
+                project=project_name,
+                error=str(exc),
+            )
 
     # ---- read-only ---------------------------------------------------
 

@@ -1,8 +1,8 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 5 — Input-Lock + Multi-Session (in progress)
-**Aktiver Checkpoint**: **C5.5** — tmux-Status-Bar Lock-Owner-Badge (kosmetisch)
-**Letzter abgeschlossener Checkpoint**: C5.4 (`/force <name> <PIN> <prompt>` PIN-gated Lock-Override)
+**Aktive Phase**: Phase 5 — Input-Lock + Multi-Session (alle Checkpoints durch ✅ — bereit für close-commit)
+**Aktiver Checkpoint**: — (alle C5.x grün, nur noch `feat(phase-5): complete phase 5` offen)
+**Letzter abgeschlossener Checkpoint**: C5.5 (tmux-Status-Bar Lock-Owner-Badge)
 
 ## Phase 5 — laufender Stand (zum Wiederaufnehmen)
 
@@ -57,28 +57,49 @@
   - 1 e2e test `test_lock_e2e.py::test_force_overrides_local_lock_with_pin`
     (real tmux, /webhook, signed payload, wrong-PIN → keep LOCAL,
     right-PIN → flip to BOT + 📨).
+- ✅ **C5.5** — tmux-Status-Bar Lock-Owner-Badge:
+  - `domain/locks.py` — pure `lock_owner_badge(owner)`:
+    BOT → `🤖 BOT`, LOCAL → `👤 LOCAL`, FREE/None → `— FREE`.
+  - `SessionService._paint_status_bar` rendert jetzt
+    `{mode_badge} · {owner_badge} [tmux_name]` (z.B.
+    `🟢 NORMAL · 🤖 BOT [wb-alpha]`); liest Owner via `_locks.current`.
+  - Neue public `SessionService.repaint_status_bar(project)` —
+    no-op wenn tmux tot oder Project missing, swallowt
+    Excepetions (rein kosmetisch, darf nie fail-closed werden).
+  - `LockService.__init__(on_owner_change=...)`-Callback,
+    feuert nur bei Owner-*Wechsel* (nicht bei no-op-Refresh):
+    acquire_for_bot (erst-grant), force_bot (flip from non-BOT),
+    note_local_input (flip from non-LOCAL), release (existing row),
+    sweep_expired (per reaped project). Callback-Fehler werden
+    geloggt, brechen aber die Lock-Op nie.
+  - `main.py` verdrahtet `LockService.on_owner_change → 
+    SessionService.repaint_status_bar` via Forward-Ref-Liste
+    (gleiche Pattern wie für auto-compact).
+  - Test-Regression: `test_session_service.py` fresh-start label
+    von `🟢 NORMAL [wb-alpha]` auf `🟢 NORMAL · — FREE [wb-alpha]`
+    angepasst.
+  - 17 unit tests `test_lock_status_badge.py`: 4 pure-helper-Tests,
+    5 paint-Layer-Tests (BOT/LOCAL/FREE-Badge, repaint-no-op-Pfade),
+    8 callback-Tests (alle Operationen × no-op-vs-flip).
 
-**Tests-Stand**: 976/976 passing (956 + 20 C5.4-Tests).
+**Tests-Stand**: 993/993 passing (976 + 17 C5.5-Tests).
 mypy `--strict` clean auf allen 80 source files, ruff clean auf
 allen angefassten Dateien.
 
 ### Was noch offen in Phase 5
 
-- ⏭ **C5.5** — tmux-Status-Bar um Lock-Owner-Badge erweitern
-  (`🟢 NORMAL · 🤖 BOT [wb-alpha]` / `· 👤 LOCAL` / `· — FREE`).
-  Aufruf von `_paint_status_bar` muss den aktuellen Lock lesen
-  (`lock_service.current(project)`). Kosmetisch, niedrige Prio.
 - ⏭ **Phase-5-Close-Commit**: `feat(phase-5): complete phase 5`
-  nach C5.5.
+  (alle C5.x grün, nur noch der Sammel-Commit + CHANGELOG.md-Eintrag
+  fehlen).
 
 ### Wie wiedereinsteigen
 
 1. Diese Datei lesen.
 2. `.claude/rules/phase-5.md` (Plan-Doc).
-3. `git log --oneline -8` für den Commit-Stand seit Phase 4 close.
+3. `git log --oneline -10` für den Commit-Stand seit Phase 4 close.
 4. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte 976/976 grün zeigen.
-5. Mit **C5.5** starten — siehe Plan oben.
+   sollte 993/993 grün zeigen.
+5. Phase-5-Close: CHANGELOG.md ergänzen + `feat(phase-5): complete phase 5`-Commit, dann auf User-Freigabe für Phase 6 warten.
 
 ## Phase 4 abgeschlossen ✅
 

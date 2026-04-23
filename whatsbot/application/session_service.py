@@ -41,6 +41,7 @@ from whatsbot.domain.claude_paths import (
 )
 from whatsbot.domain.injection import sanitize
 from whatsbot.domain.launch import build_claude_argv, render_command_line
+from whatsbot.domain.locks import LockOwner, lock_owner_badge
 from whatsbot.domain.modes import mode_badge, status_bar_color
 from whatsbot.domain.projects import Mode
 from whatsbot.domain.sessions import ClaudeSession, tmux_session_name
@@ -410,10 +411,57 @@ class SessionService:
     def _paint_status_bar(
         self, tmux_name: str, mode: Mode, project_name: str
     ) -> None:
-        del project_name  # currently unused; kept for future label layout
-        label = f"{mode_badge(mode)} [{tmux_name}]"
+        owner = self._current_lock_owner(project_name)
+        label = (
+            f"{mode_badge(mode)} · {lock_owner_badge(owner)} [{tmux_name}]"
+        )
         self._tmux.set_status(
             tmux_name,
             color=status_bar_color(mode),
             label=label,
         )
+
+    def _current_lock_owner(self, project_name: str) -> LockOwner | None:
+        """Read the current lock owner for ``project_name``.
+
+        Returns ``None`` when no LockService is wired (older test paths)
+        or when no row exists yet — the badge helper renders both as
+        FREE so the bar always shows something.
+        """
+        if self._locks is None:
+            return None
+        lock = self._locks.current(project_name)
+        return None if lock is None else lock.owner
+
+    def repaint_status_bar(self, project_name: str) -> None:
+        """Re-render the tmux status bar for ``project_name``.
+
+        Used by ``LockService`` as the ``on_owner_change`` callback so
+        every acquire / force / local-input / release flips the
+        owner badge live without requiring the user to re-issue ``/p``.
+
+        No-op if tmux isn't alive for the project — the LockService
+        sweeper hits this path on bot startup before any
+        ``ensure_started`` has run, and we don't want to surface
+        stray ``set-option`` failures there.
+        """
+        tmux_name = tmux_session_name(project_name)
+        if not self._tmux.has_session(tmux_name):
+            return
+        # Read mode from the projects row (single source of truth, Spec
+        # §6) — the claude_sessions row mirrors it but isn't authoritative.
+        try:
+            project = self._projects.get(project_name)
+        except Exception:
+            self._log.warning(
+                "repaint_status_bar_no_project", project=project_name
+            )
+            return
+        try:
+            self._paint_status_bar(tmux_name, project.mode, project_name)
+        except Exception as exc:
+            self._log.warning(
+                "repaint_status_bar_failed",
+                project=project_name,
+                error=str(exc),
+            )

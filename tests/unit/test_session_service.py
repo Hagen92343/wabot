@@ -147,9 +147,11 @@ def test_fresh_start_creates_tmux_and_row(
     assert sent_to == "wb-alpha"
     # Fresh session → no --resume.
     assert sent_text == "safe-claude"
-    # Status bar was painted green for Normal.
+    # Status bar was painted green for Normal, with the lock owner
+    # badge appended (Phase-5 C5.5). No LockService is wired in this
+    # test path, so the owner reads as None → FREE.
     assert tmux.set_status_calls == [
-        ("wb-alpha", "green", "🟢 NORMAL [wb-alpha]")
+        ("wb-alpha", "green", "🟢 NORMAL · — FREE [wb-alpha]")
     ]
     # DB row was persisted.
     persisted = SqliteClaudeSessionRepository(conn).get("alpha")

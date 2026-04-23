@@ -151,3 +151,25 @@ def is_expired(
     if lock is None or lock.owner is not LockOwner.LOCAL:
         return False
     return (now - lock.last_activity_at).total_seconds() >= timeout_seconds
+
+
+# Owner badges shown in the tmux status bar (Spec §6 layout). ``None``
+# is treated as FREE — the bot only stores a row once a lock has been
+# claimed, so a missing row means nothing-holds-it.
+_OWNER_BADGE: Final[dict[LockOwner, str]] = {
+    LockOwner.BOT: "🤖 BOT",
+    LockOwner.LOCAL: "👤 LOCAL",
+    LockOwner.FREE: "— FREE",
+}
+
+
+def lock_owner_badge(owner: LockOwner | None) -> str:
+    """Short emoji badge for the current lock owner.
+
+    Pure lookup — adapters consume the string directly when painting
+    the tmux status bar. ``None`` (no row in ``session_locks``) renders
+    as the FREE badge so the bar always tells the user *something*.
+    """
+    if owner is None:
+        return _OWNER_BADGE[LockOwner.FREE]
+    return _OWNER_BADGE[owner]

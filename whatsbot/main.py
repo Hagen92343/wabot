@@ -217,13 +217,27 @@ def create_app(
     # watcher thread and killing the observer.
     session_service: SessionService | None = None
     lock_service: LockService | None = None
+    # C5.5 forward-ref so LockService can call back into the
+    # not-yet-constructed SessionService for status-bar repaints.
+    # Resolved a few lines below right after SessionService is built.
+    session_service_status_ref: list[SessionService | None] = [None]
+
+    def _repaint_status(project: str) -> None:
+        svc = session_service_status_ref[0]
+        if svc is None:
+            return
+        svc.repaint_status_bar(project)
+
     if tmux is not None:
         # Phase 5 LockService — one instance shared by SessionService
         # (acquire before send_prompt), TranscriptIngest (note local
         # input when a non-ZWSP user turn arrives), CommandHandler
-        # (/release) and the startup sweeper.
+        # (/release) and the startup sweeper. ``on_owner_change``
+        # repaints the tmux status bar whenever the owner badge
+        # would change (C5.5).
         lock_service = LockService(
             repo=SqliteSessionLockRepository(conn),
+            on_owner_change=_repaint_status,
         )
         watcher = transcript_watcher
         ingest: TranscriptIngest | None = None
@@ -293,6 +307,10 @@ def create_app(
         # callback (constructed above before session_service existed).
         if ingest is not None:
             session_service_ref[0] = session_service
+        # Resolve the C5.5 status-bar-repaint forward ref so
+        # LockService can paint owner changes once SessionService
+        # exists.
+        session_service_status_ref[0] = session_service
 
     # ModeService is constructed only when we have a SessionService to
     # recycle; /mode without Claude running has no useful semantics.
