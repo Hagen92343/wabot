@@ -163,7 +163,7 @@ def build_router(
         session_id = body.get("session_id") if isinstance(body, dict) else None
 
         try:
-            decision = service.classify_write(
+            decision = await service.classify_write(
                 path=path,
                 project=project if isinstance(project, str) else None,
                 session_id=session_id if isinstance(session_id, str) else None,

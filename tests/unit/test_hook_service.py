@@ -57,6 +57,20 @@ class _StubProjectRepo:
     def exists(self, name: str) -> bool:  # pragma: no cover
         return name in self._projects
 
+    def update_mode(self, name: str, mode: Mode) -> None:  # pragma: no cover
+        if name not in self._projects:
+            raise ProjectNotFoundError(name)
+        existing = self._projects[name]
+        self._projects[name] = Project(
+            name=existing.name,
+            source_mode=existing.source_mode,
+            source=existing.source,
+            created_at=existing.created_at,
+            last_used_at=existing.last_used_at,
+            default_model=existing.default_model,
+            mode=mode,
+        )
+
 
 class _StubAllowRuleRepo:
     """Implements the AllowRuleRepository Protocol for hook-service tests."""
@@ -103,6 +117,10 @@ class _SpyCoordinator(ConfirmationCoordinator):
         self.calls.append(kwargs)
         return self._decision
 
+    async def ask_write(self, **kwargs: object) -> HookDecision:
+        self.calls.append(kwargs)
+        return self._decision
+
 
 def _project(name: str, mode: Mode = Mode.NORMAL) -> Project:
     return Project(
@@ -143,11 +161,15 @@ def test_stub_mode_allows_even_dangerous_commands() -> None:
 
 
 def test_classify_write_stub_allows() -> None:
+    """Stub mode (no coordinator wired) — still falls back to allow
+    for the HTTP-contract tests that don't provision a DB."""
     svc = HookService()
-    d = svc.classify_write(
-        path="/Users/me/projekte/alpha/README.md",
-        project="alpha",
-        session_id="s1",
+    d = asyncio.run(
+        svc.classify_write(
+            path="/Users/me/projekte/alpha/README.md",
+            project="alpha",
+            session_id="s1",
+        )
     )
     assert d.verdict is Verdict.ALLOW
 
@@ -326,3 +348,153 @@ def test_extreme_command_does_not_raise() -> None:
     huge = "echo " + "x" * 5000
     d = asyncio.run(svc.classify_bash(command=huge, project=None, session_id=None))
     assert d.verdict is Verdict.ALLOW  # stub mode
+
+
+# --- classify_write (C4.9) -------------------------------------------------
+
+
+def test_classify_write_project_scope_allows_without_asking(
+    tmp_path: object,
+) -> None:
+    from pathlib import Path as _Path
+
+    projects_root = _Path(str(tmp_path)) / "projekte"
+    project_dir = projects_root / "alpha"
+    project_dir.mkdir(parents=True)
+
+    projects = _StubProjectRepo({"alpha": _project("alpha", Mode.NORMAL)})
+    rules = _StubAllowRuleRepo({})
+    coordinator = _SpyCoordinator(decision=deny("should not fire"))
+    svc = HookService(
+        project_repo=projects,
+        allow_rule_repo=rules,
+        coordinator=coordinator,
+        projects_root=projects_root,
+    )
+    d = asyncio.run(
+        svc.classify_write(
+            path=str(project_dir / "src" / "main.py"),
+            project="alpha",
+            session_id="s1",
+        )
+    )
+    assert d.verdict is Verdict.ALLOW
+    # Project-scope paths don't ask the human.
+    assert coordinator.calls == []
+
+
+def test_classify_write_protected_denies_even_in_yolo(
+    tmp_path: object,
+) -> None:
+    from pathlib import Path as _Path
+
+    projects_root = _Path(str(tmp_path)) / "projekte"
+    project_dir = projects_root / "alpha"
+    project_dir.mkdir(parents=True)
+
+    projects = _StubProjectRepo({"alpha": _project("alpha", Mode.YOLO)})
+    rules = _StubAllowRuleRepo({})
+    coordinator = _SpyCoordinator(decision=allow("should not fire"))
+    svc = HookService(
+        project_repo=projects,
+        allow_rule_repo=rules,
+        coordinator=coordinator,
+        projects_root=projects_root,
+    )
+    d = asyncio.run(
+        svc.classify_write(
+            path=str(project_dir / ".git" / "config"),
+            project="alpha",
+            session_id="s1",
+        )
+    )
+    assert d.verdict is Verdict.DENY
+    # Deny-path short-circuits — coordinator not consulted.
+    assert coordinator.calls == []
+
+
+def test_classify_write_outside_project_strict_denies_silently(
+    tmp_path: object,
+) -> None:
+    from pathlib import Path as _Path
+
+    projects_root = _Path(str(tmp_path)) / "projekte"
+    (projects_root / "alpha").mkdir(parents=True)
+
+    projects = _StubProjectRepo({"alpha": _project("alpha", Mode.STRICT)})
+    rules = _StubAllowRuleRepo({})
+    coordinator = _SpyCoordinator(decision=allow("should not fire"))
+    svc = HookService(
+        project_repo=projects,
+        allow_rule_repo=rules,
+        coordinator=coordinator,
+        projects_root=projects_root,
+    )
+    d = asyncio.run(
+        svc.classify_write(
+            path="/etc/hosts",
+            project="alpha",
+            session_id="s1",
+        )
+    )
+    assert d.verdict is Verdict.DENY
+    # Strict silent-deny — no human round-trip.
+    assert coordinator.calls == []
+
+
+def test_classify_write_outside_project_normal_asks_user(
+    tmp_path: object,
+) -> None:
+    from pathlib import Path as _Path
+
+    projects_root = _Path(str(tmp_path)) / "projekte"
+    (projects_root / "alpha").mkdir(parents=True)
+
+    projects = _StubProjectRepo({"alpha": _project("alpha", Mode.NORMAL)})
+    rules = _StubAllowRuleRepo({})
+    coordinator = _SpyCoordinator(decision=allow("user approved"))
+    svc = HookService(
+        project_repo=projects,
+        allow_rule_repo=rules,
+        coordinator=coordinator,
+        projects_root=projects_root,
+    )
+    d = asyncio.run(
+        svc.classify_write(
+            path="/etc/hosts",
+            project="alpha",
+            session_id="s1",
+        )
+    )
+    assert d.verdict is Verdict.ALLOW
+    # Coordinator WAS consulted.
+    assert len(coordinator.calls) == 1
+    assert coordinator.calls[0].get("path") == "/etc/hosts"
+
+
+def test_classify_write_outside_project_yolo_allows_without_asking(
+    tmp_path: object,
+) -> None:
+    from pathlib import Path as _Path
+
+    projects_root = _Path(str(tmp_path)) / "projekte"
+    (projects_root / "alpha").mkdir(parents=True)
+
+    projects = _StubProjectRepo({"alpha": _project("alpha", Mode.YOLO)})
+    rules = _StubAllowRuleRepo({})
+    coordinator = _SpyCoordinator(decision=deny("should not fire"))
+    svc = HookService(
+        project_repo=projects,
+        allow_rule_repo=rules,
+        coordinator=coordinator,
+        projects_root=projects_root,
+    )
+    d = asyncio.run(
+        svc.classify_write(
+            path="/etc/hosts",
+            project="alpha",
+            session_id="s1",
+        )
+    )
+    assert d.verdict is Verdict.ALLOW
+    assert coordinator.calls == []

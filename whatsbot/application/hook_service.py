@@ -1,13 +1,13 @@
 """HookService — orchestrates the Pre-Tool-Hook decision flow.
 
-C3.2 scope: the real policy is now live — ``evaluate_bash`` from the
-domain runs against the project's mode + allow-list, deny-patterns
-always fire even in YOLO, and the AskUser branch is delegated to a
-``ConfirmationCoordinator`` that performs the async round-trip with
-the user's WhatsApp.
+C3.2 + C4.9 scope: both Bash and Write/Edit now run the full
+Spec §12 policy.
 
-Write/Edit classification is still the C3.1 allow-by-default stub —
-``path_rules`` land in a subsequent checkpoint.
+* Bash uses ``evaluate_bash`` against the project's mode + allow-
+  list; deny-patterns always fire even in YOLO; the AskUser branch
+  round-trips through a ``ConfirmationCoordinator``.
+* Write/Edit uses ``evaluate_write`` + protected-path check; the
+  AskUser branch uses the same coordinator via ``ask_write``.
 
 Dependency wiring intentionally has two shapes:
 
@@ -27,6 +27,8 @@ sources are already in the app.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.domain.hook_decisions import (
     HookDecision,
@@ -34,6 +36,7 @@ from whatsbot.domain.hook_decisions import (
     allow,
     evaluate_bash,
 )
+from whatsbot.domain.path_rules import evaluate_write
 from whatsbot.domain.projects import Mode
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.allow_rule_repository import AllowRuleRepository
@@ -53,11 +56,13 @@ class HookService:
         allow_rule_repo: AllowRuleRepository | None = None,
         coordinator: ConfirmationCoordinator | None = None,
         recipient: str | None = None,
+        projects_root: Path | None = None,
     ) -> None:
         self._projects = project_repo
         self._rules = allow_rule_repo
         self._coordinator = coordinator
         self._recipient = recipient
+        self._projects_root = projects_root
         self._log = get_logger("whatsbot.hook")
 
     # ---- Bash --------------------------------------------------------
@@ -115,7 +120,7 @@ class HookService:
 
     # ---- Write / Edit -----------------------------------------------
 
-    def classify_write(
+    async def classify_write(
         self,
         *,
         path: str,
@@ -124,20 +129,58 @@ class HookService:
     ) -> HookDecision:
         """Decide what to do with a Write/Edit invocation.
 
-        C3.2 keeps the allow-by-default stub — ``path_rules`` lands
-        in a later checkpoint. Native write-protection for ``.git``,
-        ``.claude`` etc. is enforced inside Claude Code already, so
-        this stub doesn't create a dangerous gap in practice.
+        Spec §12 Layer 3 lives in ``domain.path_rules.evaluate_write``;
+        this method resolves the project's cwd and the active mode,
+        then funnels the AskUser branch through the coordinator.
+
+        Stub fallback (no coordinator wired): return allow so the
+        endpoint round-trip remains testable without provisioning.
         """
+        if self._coordinator is None:
+            self._log.info(
+                "hook_write_classified",
+                path=path,
+                project=project,
+                session_id=session_id,
+                verdict="allow",
+                mode="stub",
+            )
+            return allow("hook_service stub: coordinator not wired")
+
+        mode, _ = self._project_context(project)
+        project_cwd = self._resolve_project_cwd(project)
+        decision = evaluate_write(
+            Path(path), project_cwd=project_cwd, mode=mode
+        )
+
         self._log.info(
             "hook_write_classified",
             path=path,
             project=project,
             session_id=session_id,
-            verdict="allow",
-            mode="stub",
+            verdict=decision.verdict.value,
+            mode=mode.value,
+            has_project_cwd=project_cwd is not None,
         )
-        return allow("hook_service stub: path-rules not yet wired")
+
+        if decision.verdict is not Verdict.ASK_USER:
+            return decision
+
+        return await self._coordinator.ask_write(
+            path=path,
+            project=project,
+            reason=decision.reason,
+            msg_id=session_id,
+            recipient=self._recipient,
+        )
+
+    def _resolve_project_cwd(self, project: str | None) -> Path | None:
+        """Compute ``<projects_root>/<project>`` or ``None`` if we
+        don't have enough context. Pure path math — the directory
+        doesn't have to exist on disk for the is-relative-to check."""
+        if project is None or self._projects_root is None:
+            return None
+        return self._projects_root / project
 
     # ---- helpers ----------------------------------------------------
 

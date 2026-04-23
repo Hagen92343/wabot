@@ -172,6 +172,85 @@ class ConfirmationCoordinator:
             return allow("user confirmed via PIN")
         return deny("user rejected the request")
 
+    async def ask_write(
+        self,
+        *,
+        path: str,
+        project: str | None,
+        reason: str,
+        msg_id: str | None = None,
+        recipient: str | None = None,
+    ) -> HookDecision:
+        """Open a Write confirmation for a path outside the allowed
+        scope. Same shape as ``ask_bash`` — FIFO PIN/nein routing, same
+        timeout + cleanup — only the prompt text differs (it shows the
+        target path instead of a shell command).
+        """
+        to = recipient or self._default_recipient
+        loop = asyncio.get_running_loop()
+        confirmation_id = str(ULID())
+        created_at = datetime.now(UTC)
+        deadline_ts = compute_deadline(int(time.time()), self._window)
+
+        confirmation = PendingConfirmation(
+            id=confirmation_id,
+            kind=ConfirmationKind.HOOK_WRITE,
+            payload=json.dumps({"path": path, "reason": reason}),
+            deadline_ts=deadline_ts,
+            created_at=created_at,
+            project_name=project,
+            msg_id=msg_id,
+        )
+        future: asyncio.Future[bool] = loop.create_future()
+
+        try:
+            self._repo.create(confirmation)
+        except Exception as exc:
+            self._log.exception("confirmation_persist_failed", id=confirmation_id)
+            return deny(f"failed to open confirmation: {exc!r}")
+
+        self._pending[confirmation_id] = _Pending(confirmation, future)
+        self._log.info(
+            "confirmation_opened",
+            id=confirmation_id,
+            project=project,
+            kind=ConfirmationKind.HOOK_WRITE.value,
+            deadline_ts=deadline_ts,
+        )
+
+        if to is not None:
+            try:
+                self._sender.send_text(
+                    to=to, body=_format_write_prompt(path, reason, self._window)
+                )
+            except Exception:
+                self._log.exception(
+                    "confirmation_notify_failed", id=confirmation_id, to=to
+                )
+        else:
+            self._log.warning("confirmation_no_recipient", id=confirmation_id)
+
+        try:
+            accepted = await asyncio.wait_for(future, timeout=self._window)
+        except TimeoutError:
+            self._log.warning("confirmation_timeout", id=confirmation_id)
+            self._cleanup(confirmation_id)
+            return deny("confirmation timed out (no answer within window)")
+        except asyncio.CancelledError:
+            self._log.warning("confirmation_cancelled", id=confirmation_id)
+            self._cleanup(confirmation_id)
+            raise
+
+        self._cleanup(confirmation_id)
+        self._log.info(
+            "confirmation_resolved",
+            id=confirmation_id,
+            accepted=accepted,
+        )
+        if accepted:
+            return allow("user confirmed via PIN")
+        return deny("user rejected the request")
+
     def try_resolve(self, text: str, *, pin: str) -> ResolveResult | None:
         """Route a WhatsApp text to an open confirmation if it matches.
 
@@ -230,6 +309,20 @@ def _format_bash_prompt(command: str, reason: str, window_seconds: int) -> str:
     preview = command if len(command) <= 120 else command[:117] + "..."
     return (
         "⚠️ Claude will ausführen:\n"
+        f"`{preview}`\n\n"
+        f"Grund: {reason}\n\n"
+        "Antworte mit deiner PIN zum Freigeben.\n"
+        "Antworte mit 'nein' zum Ablehnen.\n"
+        f"Timeout: {window_min} min."
+    )
+
+
+def _format_write_prompt(path: str, reason: str, window_seconds: int) -> str:
+    """Render the WhatsApp prompt for a Write/Edit outside allowed scope."""
+    window_min = max(1, window_seconds // 60)
+    preview = path if len(path) <= 140 else "..." + path[-137:]
+    return (
+        "⚠️ Claude will schreiben:\n"
         f"`{preview}`\n\n"
         f"Grund: {reason}\n\n"
         "Antworte mit deiner PIN zum Freigeben.\n"

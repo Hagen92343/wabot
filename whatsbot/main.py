@@ -321,6 +321,7 @@ def create_app(
     app.state.coordinator = coordinator
     app.state.project_repo = project_repo
     app.state.allow_rule_repo = SqliteAllowRuleRepository(conn)
+    app.state.projects_root = projects_root
     # Exposed for tests that need to drive lifecycle ops from outside
     # the webhook flow (e.g. stop_transcript_watch on teardown).
     app.state.session_service = session_service
@@ -401,6 +402,7 @@ def create_hook_app(
                 project_repo=main_app.state.project_repo,
                 allow_rule_repo=main_app.state.allow_rule_repo,
                 coordinator=main_app.state.coordinator,
+                projects_root=main_app.state.projects_root,
             )
         else:
             hook_service = HookService()
