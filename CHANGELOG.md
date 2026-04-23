@@ -7,6 +7,43 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 7 — Medien-Pipeline (in progress)
 
+#### C7.2 — PDF-Pipeline ✅
+
+PDFs landen jetzt genauso zuverlässig bei Claude wie Bilder.
+`MediaService.process_pdf` nutzt dasselbe download → validate →
+cache → send-Skelett wie `process_image`, mit folgenden
+PDF-spezifischen Unterschieden:
+
+- MIME-Allow-List: `application/pdf`.
+- Size-Cap: 20 MB (Spec §16).
+- Magic-bytes-Gate: `%PDF-`-Prefix via
+  `domain.magic_bytes.looks_like_pdf`.
+- Cache-Suffix: `.pdf` via `suffix_for_mime(DOCUMENT, ...)`.
+- Prompt-Form: `lies <path>: <caption>` (statt `analysiere ...`
+  für Bilder). Ohne Caption: reines `lies <path>`.
+- Reply-Label: `PDF an '<project>' gesendet.` (statt `Bild ...`).
+
+Infrastruktur (Downloader, Cache, Webhook-Dispatch für
+`MediaKind.DOCUMENT`, Kind-Parsing in `iter_media_messages` via
+`message["document"]`) wurde defensiv bereits in C7.1 gebaut, so
+dass C7.2 nur Tests + Cleanup war.
+
+- **Tests**: 7 neue unit (`test_media_service_pdf.py`: happy path,
+  without caption, no_active_project, wrong MIME, 21 MB oversize,
+  magic-bytes mismatch — JPEG bytes + application/pdf MIME,
+  download failure). 2 neue e2e (`test_media_e2e.py`: real tmux +
+  signed /webhook with document payload — happy path + 21 MB
+  oversize-reject).
+- **Cleanup**: Datei `test_media_image_e2e.py` → `test_media_e2e.py`
+  umbenannt (enthält jetzt image + pdf + video e2e).
+  Docstring-Hinweis "Placeholder — C7.2 wires this up" in
+  `MediaService.process_pdf` entfernt. File-Header-Docstring um
+  C7.2-Status aktualisiert.
+
+**Tests**: 1245/1245 passing (+9 vs. C7.1-Baseline),
+mypy --strict clean auf 100 source files, ruff clean (bis auf
+pre-existing E731 in `delete_service.py`).
+
 #### C7.1 — Image-Pipeline + Reject-Pfade ✅
 
 Inbound WhatsApp-Images, -PDFs (Gerüst) und unsupportete Kinds

@@ -1,8 +1,8 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 7 — Medien-Pipeline
-**Aktiver Checkpoint**: **C7.2** — PDF-Pipeline (Magic-Bytes + 20 MB-Cap)
-**Letzter abgeschlossener Checkpoint**: **C7.1** — Image-Pipeline + Reject-Pfade
+**Aktiver Checkpoint**: **C7.3** — Audio-Pipeline (download + ffmpeg)
+**Letzter abgeschlossener Checkpoint**: **C7.2** — PDF-Pipeline
 **User-Freigabe für Phase 7**: ✅ erteilt
 
 ## Wie ich in der nächsten Session weitermache
@@ -10,7 +10,7 @@
 1. **Diese Datei lesen** — du bist hier.
 2. **`.claude/rules/phase-7.md` lesen** — Plan-Doc, vom User
    approved. Dort stehen die 5 Checkpoints + Architektur.
-3. `git log --oneline -24` für den Commit-Stand seit Phase 4 close.
+3. `git log --oneline -26` für den Commit-Stand seit Phase 4 close.
 4. Baseline-Tests grün stellen:
    ```bash
    venv/bin/pytest tests/unit/ tests/integration/ \
@@ -18,16 +18,21 @@
      --ignore=tests/integration/test_hook_script.py \
      --ignore=tests/integration/test_hook_fail_closed.py
    ```
-   Erwartung: **1236/1236 grün**, mypy --strict clean (100 source
+   Erwartung: **1245/1245 grün**, mypy --strict clean (100 source
    files), ruff clean (bis auf pre-existing E731 in
    `delete_service.py`).
-5. Mit **C7.2** anfangen — siehe `phase-7.md` Sektion „C7.2".
-   Der PDF-Pfad ist zu ~90 % schon da: `MediaService.process_pdf`
-   existiert bereits (stub), `looks_like_pdf` ist pure,
-   `suffix_for_mime(DOCUMENT, "application/pdf") == ".pdf"`, und
-   der HTTP-Layer routet DOCUMENT schon an `process_pdf`. Offen
-   sind: end-to-end-Test mit PDF-Payload, ggf. Edge-Case-Tests
-   für 20 MB-Cap / magic-bytes-mismatch / ohne caption.
+5. Mit **C7.3** anfangen — siehe `phase-7.md` Sektion „C7.3".
+   Für Audio kommt neu dazu:
+   - `ports/audio_converter.py` + `adapters/ffmpeg_audio_converter.py`
+     (OGG/Opus → WAV 16 kHz mono via `ffmpeg -i ... -ar 16000 -ac 1`).
+   - `MediaService.process_audio` als Stage-1 (Download →
+     Validate → Cache → Convert). Die Whisper-Transkription (C7.4)
+     hängt dann nur noch hinten dran.
+   - Sofort-Ack `🎙 Transkribiere…` aus dem Webhook, bevor die
+     Pipeline startet.
+   - Tests: 5 unit (Convert mit FakeFfmpeg + Failure-Containment),
+     1 integration (echter ffmpeg auf Test-Fixture, skipped wenn
+     ffmpeg fehlt).
 
 ## Pre-existing Schuld (nicht-blockierend für Phase 7)
 

@@ -1,4 +1,4 @@
-"""MediaService — orchestrates the inbound media pipeline (Phase 7 C7.1).
+"""MediaService — orchestrates the inbound media pipeline (Phase 7).
 
 Flow for *supported* kinds (image / pdf / audio):
 
@@ -7,8 +7,8 @@ Flow for *supported* kinds (image / pdf / audio):
    :mod:`whatsbot.domain.magic_bytes`).
 3. Persist to the file-cache.
 4. Build a Claude prompt (``analysiere <path>: <caption>`` for images,
-   ``lies /path: <caption>`` for PDFs, raw transcript for audio — audio
-   lands in C7.4).
+   ``lies <path>: <caption>`` for PDFs, raw transcript for audio —
+   audio lands in C7.4).
 5. Hand off to :class:`SessionService.send_prompt` on the active project.
 
 The webhook layer routes each incoming media message to the right
@@ -16,8 +16,10 @@ The webhook layer routes each incoming media message to the right
 contact) never reach this service — they're rejected with a friendly
 reply by :func:`process_unsupported` called from the HTTP layer.
 
-C7.1 scope: ``process_image`` + ``process_unsupported``. PDFs (C7.2)
-and audio (C7.3/C7.4) reuse the same download-validate-cache skeleton.
+Shipped: C7.1 (image + unsupported rejects), C7.2 (PDF). Audio lands
+in C7.3 (ffmpeg convert) + C7.4 (whisper transcribe); the
+``process_audio`` method will reuse the same download/validate/cache
+skeleton as image and PDF.
 """
 
 from __future__ import annotations
@@ -99,8 +101,6 @@ class MediaService:
     def process_pdf(
         self, *, media_id: str, caption: str | None, sender: str
     ) -> MediaOutcome:
-        # Placeholder — C7.2 wires this up; leaving it in C7.1 so the
-        # dispatch table is complete and callers don't have to guard.
         return self._process_supported(
             kind=MediaKind.DOCUMENT,
             media_id=media_id,
