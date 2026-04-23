@@ -77,6 +77,7 @@ from whatsbot.application.project_service import ProjectService
 from whatsbot.application.session_service import SessionService
 from whatsbot.application.startup_recovery import StartupRecovery
 from whatsbot.application.transcript_ingest import TranscriptIngest
+from whatsbot.application.unlock_service import UnlockService
 from whatsbot.config import Environment, Settings, assert_secrets_present
 from whatsbot.domain import whitelist
 from whatsbot.http.hook_endpoint import build_router as build_hook_router
@@ -397,6 +398,14 @@ def create_app(
             notifier=notifier_impl,
         )
 
+    # UnlockService backs ``/unlock <PIN>`` (Phase 6 C6.6) — pure PIN
+    # gate on top of LockdownService.disengage. Always built since
+    # LockdownService is always available.
+    unlock_service = UnlockService(
+        lockdown_service=lockdown_service,
+        secrets=secrets_for_router,
+    )
+
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
@@ -411,6 +420,8 @@ def create_app(
         force_service=force_service,
         kill_service=kill_service,
         panic_service=panic_service,
+        unlock_service=unlock_service,
+        lockdown_service=lockdown_service,
     )
 
     # Phase 6 C6.4 — HeartbeatPumper. Auto-on in prod/dev (writes to
@@ -484,6 +495,7 @@ def create_app(
             session_repo=SqliteClaudeSessionRepository(conn),
             mode_event_repo=SqliteModeEventRepository(conn),
             session_service=session_service,
+            lockdown_service=lockdown_service,
         )
         recovery.run()
         app.state.startup_recovery = recovery

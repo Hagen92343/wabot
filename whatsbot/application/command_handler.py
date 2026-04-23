@@ -34,6 +34,7 @@ from whatsbot.application.lock_service import (
     LocalTerminalHoldsLockError,
     LockService,
 )
+from whatsbot.application.lockdown_service import LockdownService
 from whatsbot.application.mode_service import (
     InvalidModeTransitionError,
     ModeService,
@@ -44,6 +45,7 @@ from whatsbot.application.project_service import (
     ProjectService,
 )
 from whatsbot.application.session_service import SessionService
+from whatsbot.application.unlock_service import UnlockService
 from whatsbot.domain import commands
 from whatsbot.domain.allow_rules import (
     InvalidAllowRuleError,
@@ -83,6 +85,18 @@ _STOP_PREFIX: Final = "/stop "
 _KILL_COMMAND: Final = "/kill"
 _KILL_PREFIX: Final = "/kill "
 _PANIC_COMMAND: Final = "/panic"
+_UNLOCK_PREFIX: Final = "/unlock "
+_UNLOCK_COMMAND: Final = "/unlock"
+
+# Spec §7 lockdown filter — these are the only commands the bot
+# answers while lockdown is engaged. /unlock is the way out;
+# /help, /ping, /status are read-only diagnostics that are
+# safe to answer (and useful — the user wants to know it's
+# really their bot before tipping the PIN).
+_LOCKDOWN_ALLOWED_PREFIXES: Final = (_UNLOCK_PREFIX,)
+_LOCKDOWN_ALLOWED_COMMANDS: Final = frozenset(
+    {_UNLOCK_COMMAND, "/help", "/ping", "/status"}
+)
 
 
 class CommandHandler:
@@ -108,6 +122,8 @@ class CommandHandler:
         force_service: ForceService | None = None,
         kill_service: KillService | None = None,
         panic_service: PanicService | None = None,
+        unlock_service: UnlockService | None = None,
+        lockdown_service: LockdownService | None = None,
     ) -> None:
         self._projects = project_service
         self._allow = allow_service
@@ -123,12 +139,24 @@ class CommandHandler:
         self._force = force_service
         self._kill = kill_service
         self._panic = panic_service
+        self._unlock = unlock_service
+        self._lockdown = lockdown_service
         self._log = get_logger("whatsbot.commands")
 
     # ---- entrypoint -------------------------------------------------------
 
     def handle(self, text: str) -> CommandResult:
         cmd = text.strip()
+
+        # Phase 6 C6.6 — Lockdown filter. When the bot is in
+        # lockdown (panic + watchdog can both engage it), every
+        # command except a tiny allow-list is dropped with a hint.
+        # /unlock is the only escape; /help/ping/status are
+        # diagnostics. The filter runs *before* dispatch so a
+        # downstream service can't accidentally do anything.
+        lockdown_block = self._maybe_block_for_lockdown(cmd)
+        if lockdown_block is not None:
+            return lockdown_block
 
         # Project-management
         if cmd.startswith(_NEW_PREFIX):
@@ -187,6 +215,15 @@ class CommandHandler:
         # /panic — no PIN by Spec §5 (low friction in an emergency).
         if cmd == _PANIC_COMMAND:
             return self._handle_panic()
+
+        # /unlock <PIN> — PIN-gated lockdown release (Phase 6 C6.6).
+        if cmd.startswith(_UNLOCK_PREFIX):
+            return self._handle_unlock(cmd[len(_UNLOCK_PREFIX) :].strip())
+        if cmd == _UNLOCK_COMMAND:
+            return CommandResult(
+                reply="Verwendung: /unlock <PIN>",
+                command="/unlock",
+            )
 
         # Non-slash text → prompt to the active project (Phase-4
         # C4.2c). Empty text falls through to the default help
@@ -917,6 +954,63 @@ class CommandHandler:
                 "Bot ist im Lockdown. /unlock <PIN> zum Aufheben."
             ),
             command="/panic",
+        )
+
+    # ---- /unlock <PIN> + Lockdown filter (Phase 6 C6.6) ------------------
+
+    def _handle_unlock(self, pin: str) -> CommandResult:
+        """Verify PIN, disengage lockdown."""
+        if self._unlock is None:
+            return CommandResult(
+                reply="⚠️ Unlock-Service nicht konfiguriert.",
+                command="/unlock",
+            )
+        if not pin:
+            return CommandResult(
+                reply="Verwendung: /unlock <PIN>",
+                command="/unlock",
+            )
+        try:
+            outcome = self._unlock.unlock(pin)
+        except InvalidPinError:
+            return CommandResult(reply="⚠️ Falsche PIN.", command="/unlock")
+        except PanicPinNotConfiguredError as exc:
+            self._log.error("panic_pin_missing", error=str(exc))
+            return CommandResult(reply=f"⚠️ {exc}", command="/unlock")
+        if not outcome.was_engaged:
+            return CommandResult(
+                reply="🔓 Bot war nicht im Lockdown.",
+                command="/unlock",
+            )
+        return CommandResult(
+            reply="🔓 Lockdown aufgehoben.",
+            command="/unlock",
+        )
+
+    def _maybe_block_for_lockdown(self, cmd: str) -> CommandResult | None:
+        """Spec §7 lockdown filter.
+
+        Called from the top of ``handle()``. Returns a friendly
+        block-message ``CommandResult`` if lockdown is engaged and
+        ``cmd`` is *not* in the allow-list; ``None`` otherwise (in
+        which case the dispatcher proceeds normally).
+        """
+        if self._lockdown is None:
+            return None
+        if not self._lockdown.is_engaged():
+            return None
+        # Allow-list: bare commands or any command in the prefix list.
+        if cmd in _LOCKDOWN_ALLOWED_COMMANDS:
+            return None
+        for prefix in _LOCKDOWN_ALLOWED_PREFIXES:
+            if cmd.startswith(prefix):
+                return None
+        # Anything else: surface lockdown + how to clear it.
+        return CommandResult(
+            reply=(
+                "🔒 Bot ist im Lockdown. /unlock <PIN> zum Aufheben."
+            ),
+            command="<lockdown>",
         )
 
     # ---- helpers ----------------------------------------------------------

@@ -1,8 +1,8 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 6 — Kill-Switch + Watchdog + Sleep-Handling (in progress)
-**Aktiver Checkpoint**: **C6.5** — pmset Sleep/Wake-Handling (kosmetisch in Phase 6, vermeidet false-positive watchdog-Trigger nach Mac-Sleep)
-**Letzter abgeschlossener Checkpoint**: C6.4 (Heartbeat-Pumper + Watchdog-LaunchAgent)
+**Aktiver Checkpoint**: **C6.5** (kosmetisch) ODER **C6.7** (edge-case polish) — siehe „Was noch offen"
+**Letzter abgeschlossener Checkpoint**: C6.6 (`/unlock <PIN>` + Lockdown-Filter + StartupRecovery respektiert Lockdown)
 
 ## Phase 6 — laufender Stand (zum Wiederaufnehmen)
 
@@ -137,9 +137,47 @@
     panic-Marker-Touch, Notification, JSON-Log-Format.
   - 1 integration `test_heartbeat_lifespan.py`: TestClient → File
     appears bei startup, verschwindet bei shutdown.
+- ✅ **C6.6** — `/unlock <PIN>` + Lockdown-Filter:
+  - `application/unlock_service.py` — `UnlockService.unlock(pin)`:
+    PIN-Verify via `hmac.compare_digest` gegen Keychain-`panic-pin`
+    + `lockdown_service.disengage()`. Pin-Check läuft auch wenn
+    Lockdown nicht engaged ist (kein info-leak via timing).
+    Wiederverwendet `InvalidPinError` + `PanicPinNotConfiguredError`
+    aus `delete_service`.
+  - `CommandHandler` Lockdown-Filter ganz oben in `handle()`:
+    während Lockdown engaged ist, wird *jeder* Command außer
+    `/unlock <PIN>`, `/help`, `/ping`, `/status` mit
+    `🔒 Bot ist im Lockdown. /unlock <PIN> zum Aufheben.` geblockt.
+    Auch nackte Prompts (das gefährlichste Angriffs-Surface) sind
+    geblockt.
+  - `CommandHandler._handle_unlock(pin)`: parse'd PIN, ruft
+    `unlock_service.unlock`. Replies:
+    - korrekte PIN + war engaged → `🔓 Lockdown aufgehoben.`
+    - korrekte PIN + nicht engaged → `🔓 Bot war nicht im Lockdown.`
+    - falsche PIN → `⚠️ Falsche PIN.` (Lockdown bleibt)
+    - missing keychain → `⚠️ Panic-PIN ist im Keychain nicht gesetzt.`
+    - bare `/unlock` → `Verwendung: /unlock <PIN>`
+  - `StartupRecovery` akzeptiert optional `lockdown_service`-Param.
+    Wenn engaged: skip YOLO-Reset + skip session-restore, return
+    `RecoveryReport(skipped_for_lockdown=True)` mit `warning`-log.
+    Bot bleibt up um `/unlock` zu beantworten, aber relauncht
+    keine Claudes.
+  - `main.py` baut UnlockService immer (LockdownService ist immer
+    da), wired ins CommandHandler-`unlock_service` + `lockdown_service`-
+    Params, und reicht LockdownService an StartupRecovery durch.
+  - 6 unit `test_unlock_service.py` (PIN-Pfade, constant-time-compare,
+    leeres PIN, missing keychain, no-info-leak bei nicht-engaged).
+  - 13 unit `test_unlock_command.py` (Reply-Format für alle Pfade,
+    Lockdown-Filter blockt /ls /new /p bare-prompts, allows
+    /unlock /help /ping /status, no-op wenn LockdownService fehlt).
+  - 3 unit `test_startup_recovery_lockdown.py` (skip bei engaged,
+    normal bei clear, backward-compat ohne LockdownService).
+  - 1 e2e `test_unlock_e2e.py` (real tmux + signed /webhook):
+    `/p` → `/panic` → blockierte Replies auf `/ls`/`/p`/bare-prompt
+    → wrong PIN → right PIN → `/ls` funktioniert wieder.
 
-**Tests-Stand**: 1077/1077 passing (1044 + 33 C6.4-Tests).
-mypy `--strict` clean auf allen 92 source files, ruff clean auf
+**Tests-Stand**: 1099/1099 passing (1077 + 22 C6.6-Tests).
+mypy `--strict` clean auf allen 93 source files, ruff clean auf
 allen angefassten Dateien.
 
 **Pre-existing Schuld (unverändert, außerhalb Phase-6-Scope)**:
@@ -154,18 +192,25 @@ einen Phase-4-Cleanup-Commit (NULL statt empty oder UNIQUE drop).
   Lockdown stoppt dann sauber alles bis zum `/unlock`. Akzeptabel
   als kosmetisch/niedrig-prio — ein Sleep-Aware-Watchdog käme mit
   pmset-event-Parsing oder einfacherem long-Threshold-Fallback.
-- ⏭ **C6.6** — `/unlock <PIN>` + Lockdown-Filter im CommandHandler.
-- ⏭ **C6.7** — Edge-Cases.
+- ⏭ **C6.7** — Edge-Cases (StartupRecovery-Notice an Default-
+  Recipient bei Lockdown-Skip wäre nice-to-have; läßt sich auch
+  in Phase 8 unter Observability einreihen).
+
+Mit **C6.6 fertig** ist die Kern-Notfall-Infrastruktur komplett:
+`/stop`, `/kill`, `/panic`, `/unlock`, Heartbeat+Watchdog,
+Lockdown-Filter, StartupRecovery-Lockdown-Respekt. Der Bot ist
+vom Handy aus jederzeit beherrschbar (vier Eskalationsstufen)
+und überlebt Crashes via Watchdog-Backstop.
 
 ### Wie wiedereinsteigen
 
 1. Diese Datei lesen.
 2. `.claude/rules/phase-6.md` (Plan-Doc).
-3. `git log --oneline -16` für den Commit-Stand.
+3. `git log --oneline -18` für den Commit-Stand.
 4. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte 1077/1077 grün zeigen.
-5. Mit **C6.5** (pmset Sleep-Awareness, kosmetisch) oder direkt
-   mit **C6.6** (`/unlock` + Lockdown-Filter) starten — siehe Plan.
+   sollte 1099/1099 grün zeigen.
+5. Mit **C6.5** (kosmetisch) oder direkt **Phase-6-Close-Commit**
+   (CHANGELOG + Sammel-Commit) starten — beide Pfade legitim.
 
 ## Phase 5 — laufender Stand (zum Wiederaufnehmen)
 

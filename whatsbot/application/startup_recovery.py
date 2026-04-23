@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 
 from ulid import ULID
 
+from whatsbot.application.lockdown_service import LockdownService
 from whatsbot.application.session_service import SessionService
 from whatsbot.domain.mode_events import ModeEvent, ModeEventKind
 from whatsbot.domain.projects import Mode
@@ -54,6 +55,7 @@ class RecoveryReport:
     yolo_resets: tuple[str, ...]
     restored_sessions: tuple[str, ...]
     failed_sessions: tuple[str, ...]
+    skipped_for_lockdown: bool = False
 
 
 class StartupRecovery:
@@ -64,15 +66,34 @@ class StartupRecovery:
         session_repo: ClaudeSessionRepository,
         mode_event_repo: ModeEventRepository,
         session_service: SessionService,
+        lockdown_service: LockdownService | None = None,
     ) -> None:
         self._projects = project_repo
         self._sessions = session_repo
         self._events = mode_event_repo
         self._session_service = session_service
+        self._lockdown = lockdown_service
         self._log = get_logger("whatsbot.startup_recovery")
 
     def run(self) -> RecoveryReport:
-        """Coerce YOLO, then restore sessions. Order matters."""
+        """Coerce YOLO, then restore sessions. Order matters.
+
+        Phase 6 C6.6 — when lockdown is engaged, skip *both*
+        steps. The bot stays up to receive ``/unlock``, but won't
+        relaunch any Claude sessions until the user clears the
+        lockdown. Spec §7.
+        """
+        if self._lockdown is not None and self._lockdown.is_engaged():
+            self._log.warning(
+                "startup_recovery_skipped_for_lockdown",
+                reason=self._lockdown.current().reason,
+            )
+            return RecoveryReport(
+                yolo_resets=(),
+                restored_sessions=(),
+                failed_sessions=(),
+                skipped_for_lockdown=True,
+            )
         resets = self.reset_yolo_to_normal()
         restored, failed = self.restore_sessions()
         self._log.info(
