@@ -1,8 +1,87 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 4 — Mode-System + Claude-Launch — **KOMPLETT** ✅
-**Nächste Phase**: Phase 5 — Input-Lock + Multi-Session (wartet auf User-Freigabe)
-**Letzter abgeschlossener Checkpoint**: C4.9 (Path-Rules für Write/Edit)
+**Aktive Phase**: Phase 5 — Input-Lock + Multi-Session (in progress)
+**Aktiver Checkpoint**: **C5.4** — `/force <name> <PIN> <prompt>` (PIN-gated Lock-Override)
+**Letzter abgeschlossener Checkpoint**: C5.3 (Lock-Soft-Preemption End-to-End via /webhook)
+
+## Phase 5 — laufender Stand (zum Wiederaufnehmen)
+
+- ✅ **C5.1a** — `domain/locks.py` (pure): `LockOwner` enum, `SessionLock`
+  dataclass, `evaluate_bot_attempt`, `mark_local_input`, `is_expired`,
+  `LOCK_TIMEOUT_SECONDS=60`. 14 unit tests.
+- ✅ **C5.1b** — `ports/session_lock_repository.py` +
+  `adapters/sqlite_session_lock_repository.py` (get/upsert/delete/list_all).
+  8 unit tests inkl. CHECK-Constraint-Regression.
+- ✅ **C5.1c** — `application/lock_service.py`:
+  `acquire_for_bot` (raise `LocalTerminalHoldsLockError` bei Denial),
+  `note_local_input`, `release`, `force_bot`, `sweep_expired`, `current`.
+  Clock-injectable für Tests. 16 unit tests.
+- ✅ **C5.2** — Wiring:
+  - `TranscriptIngest.on_local_input`-Callback, fires aus `_handle_user`
+    wenn non-ZWSP + non-empty user turn landet.
+  - `SessionService.__init__(lock_service=...)`; `send_prompt` ruft
+    `acquire_for_bot` vor `tmux.send_text`. `LocalTerminalHoldsLockError`
+    propagiert nach oben.
+  - `CommandHandler` fängt die Exception in `_dispatch_prompt` und
+    rendert `🔒 Terminal aktiv. /force <name> <prompt> oder /release`.
+  - Neue Commands `/release` + `/release <name>` (setzt Lock auf FREE).
+  - `main.py` verdrahtet **eine** LockService-Instanz in Ingest +
+    SessionService + CommandHandler + (vorbereitet für) Sweeper.
+  - 3 neue Wiring-Tests (`test_lock_wiring.py`).
+- ✅ **C5.3** — End-to-End Integration-Test via `/webhook`:
+  preseed local lock → `/p alpha hi` → 🔒-Reply; `/release alpha` →
+  Lock weg → `/p alpha hi` funktioniert. Real tmux,
+  `safe-claude=/bin/true`. 2 Tests in `test_lock_e2e.py`.
+
+**Tests-Stand**: 956/956 passing (941 + 15 Phase-5-Tests).
+mypy `--strict` clean auf allen 79 source files, ruff clean auf
+allen angefassten Dateien.
+
+### Was noch offen in Phase 5
+
+- ⏭ **C5.4** — `/force <name> <PIN> <prompt>`: PIN-gated Lock-Override.
+  Nutzt die Keychain-`panic-pin` (wie `/rm`). Logisch:
+  1. Parse `<name> <PIN> <prompt>` (PIN ist die zweite Token).
+  2. Validiere PIN gegen `KEY_PANIC_PIN` via `SecretsProvider`.
+  3. Bei match: `lock_service.force_bot(project)` + `send_prompt(project, prompt)`.
+  4. Bei miss: `⚠️ Falsche PIN`-Reply.
+  CommandHandler.__init__ braucht dafür `SecretsProvider` (oder analog
+  zu `DeleteService` einen neuen `ForceService`). Vorschlag: Wiederverwendung
+  des vorhandenen `DeleteService`-PIN-Musters oder kleine `ForceService`-
+  Hülle, die `SecretsProvider.get(KEY_PANIC_PIN)` einmal liest.
+- ⏭ **C5.5** — tmux-Status-Bar um Lock-Owner-Badge erweitern
+  (`🟢 NORMAL · 🤖 BOT [wb-alpha]` / `· 👤 LOCAL` / `· — FREE`).
+  Aufruf von `_paint_status_bar` muss den aktuellen Lock lesen
+  (`lock_service.current(project)`). Kosmetisch, niedrige Prio.
+- ⏭ **Phase-5-Close-Commit**: `feat(phase-5): complete phase 5`
+  nach C5.4 + C5.5.
+
+### Wie wiedereinsteigen
+
+1. Diese Datei lesen.
+2. `.claude/rules/phase-5.md` (Plan-Doc).
+3. `git log --oneline -7` für den Commit-Stand seit Phase 4 close.
+4. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
+   sollte 956/956 grün zeigen.
+5. Mit **C5.4** starten — siehe Plan oben.
+
+## Phase 4 abgeschlossen ✅
+
+Alle 9 Checkpoints grün. Siehe Commit `eb48ca1`
+(`feat(phase-4): complete phase 4`) für die volle Zusammenfassung.
+**Was End-to-End funktioniert:**
+
+- `/new <name> [git <url>]` legt Projekt an (inkl. Smart-Detection).
+- `/p <name>` startet Claude in tmux.
+- `/p <name> <prompt>` + nackter Text schickt Prompt; Antwort
+  kommt async via Transcript-Watcher → Redaction → WhatsApp.
+- `/mode normal|strict|yolo` recycelt die Session, schreibt Audit-
+  Row, bewahrt Context via `--resume`.
+- Pre-Tool-Hook honoriert den aktiven Mode für Bash **und**
+  Write/Edit; Deny-Patterns + protected paths greifen auch in YOLO.
+- Auto-Compact bei 80% Context-Fill.
+- Bot-Restart resumed jede Session via `--resume` und coerct
+  YOLO → Normal.
 
 ## Phase 4 — laufender Stand (zum Wiederaufnehmen)
 
