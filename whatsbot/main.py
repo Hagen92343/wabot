@@ -19,6 +19,7 @@ from fastapi.responses import PlainTextResponse
 
 import whatsbot
 from whatsbot.adapters.keychain_provider import KeychainProvider
+from whatsbot.adapters.osascript_notifier import OsascriptNotifier
 from whatsbot.adapters.redacting_sender import RedactingMessageSender
 from whatsbot.adapters.sqlite_allow_rule_repository import (
     SqliteAllowRuleRepository,
@@ -47,6 +48,9 @@ from whatsbot.adapters.sqlite_session_lock_repository import (
     SqliteSessionLockRepository,
 )
 from whatsbot.adapters.subprocess_git_clone import SubprocessGitClone
+from whatsbot.adapters.subprocess_process_killer import (
+    SubprocessProcessKiller,
+)
 from whatsbot.adapters.tmux_subprocess import SubprocessTmuxController
 from whatsbot.adapters.watchdog_transcript_watcher import (
     WatchdogTranscriptWatcher,
@@ -61,8 +65,10 @@ from whatsbot.application.force_service import ForceService
 from whatsbot.application.hook_service import HookService
 from whatsbot.application.kill_service import KillService
 from whatsbot.application.lock_service import LockService
+from whatsbot.application.lockdown_service import LockdownService
 from whatsbot.application.mode_service import ModeService
 from whatsbot.application.output_service import OutputService
+from whatsbot.application.panic_service import PanicService
 from whatsbot.application.project_service import ProjectService
 from whatsbot.application.session_service import SessionService
 from whatsbot.application.startup_recovery import StartupRecovery
@@ -75,6 +81,8 @@ from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddle
 from whatsbot.logging_setup import configure_logging, get_logger
 from whatsbot.ports.git_clone import GitClone
 from whatsbot.ports.message_sender import MessageSender
+from whatsbot.ports.notification_sender import NotificationSender
+from whatsbot.ports.process_killer import ProcessKiller
 from whatsbot.ports.secrets_provider import (
     KEY_ALLOWED_SENDERS,
     SecretNotFoundError,
@@ -99,6 +107,8 @@ def create_app(
     claude_home: Path | None = None,
     discovery_timeout_seconds: float | None = None,
     run_startup_recovery: bool = False,
+    process_killer: ProcessKiller | None = None,
+    notifier: NotificationSender | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -343,6 +353,43 @@ def create_app(
     if tmux is not None:
         kill_service = KillService(tmux=tmux, lock_service=lock_service)
 
+    # LockdownService persists the Spec §7 emergency-state flag in
+    # ``app_state.lockdown`` and writes ``/tmp/whatsbot-PANIC`` for
+    # the watchdog. Always built — even non-tmux paths can engage
+    # lockdown if the security layer needs to.
+    lockdown_service = LockdownService(
+        app_state=app_state_repo,
+        panic_marker_path=settings.panic_marker_path,
+    )
+
+    # PanicService orchestrates ``/panic`` (Phase 6 C6.2 + C6.3).
+    # Needs tmux + LockService + ProcessKiller. ProcessKiller falls
+    # back to a real ``pkill -9 -f ...`` adapter when not injected;
+    # tests inject the in-memory fake.
+    panic_service: PanicService | None = None
+    if tmux is not None and lock_service is not None:
+        process_killer_impl: ProcessKiller = (
+            process_killer
+            if process_killer is not None
+            else SubprocessProcessKiller()
+        )
+        notifier_impl: NotificationSender | None
+        if notifier is not None:
+            notifier_impl = notifier
+        elif settings.env is not Environment.TEST:
+            notifier_impl = OsascriptNotifier()
+        else:
+            notifier_impl = None
+        panic_service = PanicService(
+            tmux=tmux,
+            project_repo=project_repo,
+            mode_event_repo=SqliteModeEventRepository(conn),
+            lock_service=lock_service,
+            lockdown_service=lockdown_service,
+            process_killer=process_killer_impl,
+            notifier=notifier_impl,
+        )
+
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
@@ -356,6 +403,7 @@ def create_app(
         lock_service=lock_service,
         force_service=force_service,
         kill_service=kill_service,
+        panic_service=panic_service,
     )
 
     app = FastAPI(

@@ -34,6 +34,11 @@ class Environment(StrEnum):
 _DEFAULT_LOG_DIR = Path.home() / "Library" / "Logs" / "whatsbot"
 _DEFAULT_DB_PATH = Path.home() / "Library" / "Application Support" / "whatsbot" / "state.db"
 _DEFAULT_BACKUP_DIR = Path.home() / "Backups" / "whatsbot"
+# Spec §4 — touch-files used by the watchdog (Phase 6). They live in
+# /tmp on purpose: a reboot wipes them, an orphaned PANIC marker
+# never survives across power cycles.
+_DEFAULT_PANIC_MARKER = Path("/tmp/whatsbot-PANIC")  # noqa: S108 — Spec §4 path
+_DEFAULT_HEARTBEAT_PATH = Path("/tmp/whatsbot-heartbeat")  # noqa: S108 — Spec §4 path
 
 
 class Settings(BaseModel):
@@ -44,6 +49,8 @@ class Settings(BaseModel):
     log_dir: Path = Field(default_factory=lambda: _DEFAULT_LOG_DIR)
     db_path: Path = Field(default_factory=lambda: _DEFAULT_DB_PATH)
     backup_dir: Path = Field(default_factory=lambda: _DEFAULT_BACKUP_DIR)
+    panic_marker_path: Path = Field(default_factory=lambda: _DEFAULT_PANIC_MARKER)
+    heartbeat_path: Path = Field(default_factory=lambda: _DEFAULT_HEARTBEAT_PATH)
     bind_host: str = "127.0.0.1"
     bind_port: int = 8000
     hook_bind_host: str = "127.0.0.1"

@@ -1,8 +1,8 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 6 — Kill-Switch + Watchdog + Sleep-Handling (in progress)
-**Aktiver Checkpoint**: **C6.2** — `/panic` (vollständige Eskalation, <2s)
-**Letzter abgeschlossener Checkpoint**: C6.1 (`/stop` + `/kill` + neue `TmuxController.interrupt`)
+**Aktiver Checkpoint**: **C6.4** — Heartbeat-Pumper + Watchdog-LaunchAgent
+**Letzter abgeschlossener Checkpoint**: C6.2/C6.3 (`/panic` + YOLO-Reset + Lockdown)
 
 ## Phase 6 — laufender Stand (zum Wiederaufnehmen)
 
@@ -34,31 +34,88 @@
     Lock-Suffix nur wenn was zum Releasen war).
   - 2 e2e `test_kill_e2e.py` (real tmux, signed /webhook,
     `/stop` lässt Session leben, `/kill` killt + released).
+- ✅ **C6.2 / C6.3** — `/panic` Vollkatastrophe + YOLO-Reset:
+  - `domain/lockdown.py` (pure): `LockdownState`, `engage`,
+    `disengaged`, `LOCKDOWN_REASON_*` Konstanten. Engage ist
+    idempotent — first-trigger-Metadata bleibt erhalten
+    (Forensik). Unbekannte Reason → ValueError.
+  - `application/lockdown_service.py`: persistiert in
+    `app_state.lockdown` (JSON-blob) + Touch-File
+    `/tmp/whatsbot-PANIC` (für Watchdog). Touch-File-Failures
+    blocken die DB nie. Tolerant gegen JSON-Garble +
+    Partial-Rows beim Lesen.
+  - `ports/process_killer.py` + `adapters/subprocess_process_killer.py`:
+    `pkill -9 -f <pattern>` mit narrow default-Pattern
+    `safe-claude` (Spec-Abbruch-Kriterium: keine fremden
+    Claude-Instanzen killen). Exit 1 = no-match = success.
+  - `ports/notification_sender.py` + `adapters/osascript_notifier.py`:
+    macOS-Notification via `osascript -e 'display notification ...'`,
+    no-op fallback wenn osascript fehlt. Failures swallowed.
+  - `application/panic_service.py`: orchestriert die 6-step
+    Spec-§7-Playbook in genau dieser Reihenfolge:
+    (1) Lockdown engage → (2) wb-* enumerate + kill_session →
+    (3) `pkill -9 -f safe-claude` Backstop →
+    (4) YOLO → Normal pro Projekt + `mode_events.event='panic_reset'` →
+    (5) Locks release pro Projekt →
+    (6) macOS-Notification mit Sound.
+    Idempotent (zweiter panic-call ist safe, lockdown_at bleibt).
+    Klobeck-failures (notifier, killer, audit) werden geloggt
+    aber brechen die anderen Schritte nie.
+  - `CommandHandler._handle_panic`: keine PIN per Spec §5,
+    Reply `🚨 PANIC! N Sessions getötet, M YOLO → Normal,
+    K Locks freigegeben, in X ms.\nBot ist im Lockdown.
+    /unlock <PIN> zum Aufheben.`. Innere Exceptions werden
+    abgefangen, User sieht "Pruefe /errors am Mac".
+  - `Settings`: neue Felder `panic_marker_path` (default
+    `/tmp/whatsbot-PANIC`) und `heartbeat_path` (default
+    `/tmp/whatsbot-heartbeat`, vorbereitet für C6.4).
+  - `main.py` baut LockdownService immer (auch ohne tmux —
+    z.B. wenn andere Layer eine Lockdown-Engage brauchen),
+    PanicService nur wenn tmux + lock_service vorhanden.
+    `process_killer` und `notifier` sind injectable für Tests;
+    Default-Adapters in non-test-env.
+  - 5 unit tests `test_lockdown.py` (alle Pure-Übergänge).
+  - 10 unit tests `test_lockdown_service.py` (engage/disengage
+    Roundtrip, Idempotenz, Marker-Failure-Containment, JSON-
+    Tolerance bei Garble + Partial-Rows).
+  - 9 unit tests `test_panic_service.py` (Full-Playbook,
+    Lockdown-vor-Sessions-Ordering-Invariante, killer-failure-
+    Containment, notifier-failure-Containment, non-wb-Sessions
+    überleben, audit-Rows nur für YOLOs, Idempotenz, Latenz <2s).
+  - 4 unit tests `test_panic_command.py` (Reply-Format, kein
+    PIN-Parsing, no-config-Guard, Inner-Exception → friendly
+    Reply).
+  - 1 e2e `test_panic_e2e.py` (real tmux, signed /webhook —
+    wb-* killed, foreign survives, BOTH YOLOs reset, audit-
+    Rows, Lockdown engaged in DB, Touch-File auf Disk,
+    `safe-claude` kommt im Killer-Pattern an).
 
-**Tests-Stand**: 1015/1015 passing (993 + 22 C6.1-Tests).
-mypy `--strict` clean auf allen 81 source files, ruff clean auf
+**Tests-Stand**: 1044/1044 passing (1015 + 29 C6.2/C6.3-Tests).
+mypy `--strict` clean auf allen 88 source files, ruff clean auf
 allen angefassten Dateien.
+
+**Pre-existing Schuld (außerhalb C6.2-Scope)**:
+`claude_sessions.session_id TEXT UNIQUE` kollidiert wenn zwei
+frische Sessions beide leeren session_id haben. e2e umgeht das
+indem nur eine wb-*-Session per /p hochgefahren wird; das
+zweite YOLO-Projekt wird DB-direkt geseedet. Fix gehört in
+einen Phase-4-Cleanup-Commit (NULL statt empty oder UNIQUE drop).
 
 ### Was noch offen in Phase 6
 
-- ⏭ **C6.2** — `/panic` Vollkatastrophe in <2s:
-  Lockdown setzen + Touch-File → wb-* enumerieren + kill_session
-  pro Session → `pkill -9 -f claude` Backstop → YOLO→Normal
-  pro Projekt → Locks releasen → macOS-Notification.
-- ⏭ **C6.3** — YOLO-Reset bei Panic (mode_events `panic_reset`).
 - ⏭ **C6.4** — Heartbeat-Pumper + Watchdog-LaunchAgent.
 - ⏭ **C6.5** — pmset Sleep/Wake-Handling.
 - ⏭ **C6.6** — `/unlock <PIN>` + Lockdown-Filter im CommandHandler.
-- ⏭ **C6.7** — Edge-Cases + macOS-Notification.
+- ⏭ **C6.7** — Edge-Cases.
 
 ### Wie wiedereinsteigen
 
 1. Diese Datei lesen.
 2. `.claude/rules/phase-6.md` (Plan-Doc).
-3. `git log --oneline -12` für den Commit-Stand.
+3. `git log --oneline -14` für den Commit-Stand.
 4. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte 1015/1015 grün zeigen.
-5. Mit **C6.2** starten — siehe Plan oben.
+   sollte 1044/1044 grün zeigen.
+5. Mit **C6.4** starten — siehe Plan oben (Heartbeat + Watchdog).
 
 ## Phase 5 — laufender Stand (zum Wiederaufnehmen)
 

@@ -38,6 +38,7 @@ from whatsbot.application.mode_service import (
     InvalidModeTransitionError,
     ModeService,
 )
+from whatsbot.application.panic_service import PanicService
 from whatsbot.application.project_service import (
     ProjectFilesystemError,
     ProjectService,
@@ -81,6 +82,7 @@ _STOP_COMMAND: Final = "/stop"
 _STOP_PREFIX: Final = "/stop "
 _KILL_COMMAND: Final = "/kill"
 _KILL_PREFIX: Final = "/kill "
+_PANIC_COMMAND: Final = "/panic"
 
 
 class CommandHandler:
@@ -105,6 +107,7 @@ class CommandHandler:
         lock_service: LockService | None = None,
         force_service: ForceService | None = None,
         kill_service: KillService | None = None,
+        panic_service: PanicService | None = None,
     ) -> None:
         self._projects = project_service
         self._allow = allow_service
@@ -119,6 +122,7 @@ class CommandHandler:
         self._locks = lock_service
         self._force = force_service
         self._kill = kill_service
+        self._panic = panic_service
         self._log = get_logger("whatsbot.commands")
 
     # ---- entrypoint -------------------------------------------------------
@@ -179,6 +183,10 @@ class CommandHandler:
             return self._handle_kill(None)
         if cmd.startswith(_KILL_PREFIX):
             return self._handle_kill(cmd[len(_KILL_PREFIX) :].strip())
+
+        # /panic — no PIN by Spec §5 (low friction in an emergency).
+        if cmd == _PANIC_COMMAND:
+            return self._handle_panic()
 
         # Non-slash text → prompt to the active project (Phase-4
         # C4.2c). Empty text falls through to the default help
@@ -863,6 +871,52 @@ class CommandHandler:
                 f"🪓 '{outcome.project_name}' tmux-Session beendet{suffix}."
             ),
             command="/kill",
+        )
+
+    # ---- /panic (Phase 6 C6.2) ------------------------------------------
+
+    def _handle_panic(self) -> CommandResult:
+        """Run the full Spec §7 panic playbook.
+
+        Bewusst kein PIN (Spec §5): in Panik soll der User nicht erst
+        ein Passwort tippen müssen. Lockdown nach Panic blockiert
+        ohnehin alle weiteren Befehle bis ``/unlock <PIN>``.
+        """
+        if self._panic is None:
+            return CommandResult(
+                reply="⚠️ Panic-Service nicht konfiguriert.",
+                command="/panic",
+            )
+        try:
+            outcome = self._panic.panic()
+        except Exception as exc:
+            self._log.exception(
+                "panic_failed", error=str(exc)
+            )
+            return CommandResult(
+                reply=(
+                    "⚠️ Panic ist mitten im Lauf gescheitert. "
+                    "Pruefe /errors am Mac."
+                ),
+                command="/panic",
+            )
+        ms = round(outcome.duration_seconds * 1000)
+        bits: list[str] = [
+            f"🚨 PANIC! {len(outcome.sessions_killed)} Sessions getötet"
+        ]
+        if outcome.yolo_projects_reset:
+            bits.append(
+                f"{len(outcome.yolo_projects_reset)} YOLO → Normal"
+            )
+        if outcome.locks_released:
+            bits.append(f"{len(outcome.locks_released)} Locks freigegeben")
+        bits.append(f"in {ms} ms")
+        return CommandResult(
+            reply=(
+                ", ".join(bits) + ".\n"
+                "Bot ist im Lockdown. /unlock <PIN> zum Aufheben."
+            ),
+            command="/panic",
         )
 
     # ---- helpers ----------------------------------------------------------
