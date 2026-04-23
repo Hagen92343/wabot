@@ -186,6 +186,29 @@ class SessionService:
             return
         self._watcher.unwatch(handle)
 
+    def recycle(self, project_name: str) -> ClaudeSession:
+        """Kill the tmux session, then relaunch via ``ensure_started``.
+
+        Phase-4 C4.3 mode-switch path: the caller updates
+        ``projects.mode`` (via ``ProjectRepository.update_mode``)
+        *before* calling recycle so that ensure_started reads the new
+        mode and builds the right ``safe-claude`` argv. The
+        ``claude_sessions.session_id`` is preserved, so ``--resume``
+        keeps the conversation context intact across the flag
+        change.
+
+        Also drops any in-flight transcript ingest state for the
+        project (the new Claude process gets a clean buffer) and
+        detaches the existing transcript watch — ensure_started
+        re-attaches once the recycled Claude writes its first event.
+        """
+        self.stop_transcript_watch(project_name)
+        if self._ingest is not None:
+            self._ingest.reset(project_name)
+        tmux_name = tmux_session_name(project_name)
+        self._tmux.kill_session(tmux_name)
+        return self.ensure_started(project_name)
+
     def send_prompt(self, project_name: str, text: str) -> None:
         """Deliver a user prompt into the project's Claude session.
 

@@ -1044,3 +1044,184 @@ def test_send_prompt_unknown_project_for_one_shot_errors(
     result = handler.handle("/p ghost hi")
     assert "⚠️" in result.reply
     assert "/ls" in result.reply
+
+
+# --- /mode (C4.3) ---------------------------------------------------------
+
+
+class _StubModeService:
+    """Records change_mode/show_mode calls."""
+
+    def __init__(self) -> None:
+        from whatsbot.domain.projects import Mode as _Mode
+
+        self._current: dict[str, _Mode] = {}
+        self.change_calls: list[tuple[str, _Mode]] = []
+
+    def seed(self, project: str, mode: object) -> None:
+        self._current[project] = mode  # type: ignore[assignment]
+
+    def show_mode(self, project: str) -> object:
+        from whatsbot.ports.project_repository import (
+            ProjectNotFoundError as _NotFound,
+        )
+
+        if project not in self._current:
+            raise _NotFound(f"no {project}")
+        return self._current[project]
+
+    def change_mode(
+        self, project: str, new_mode: object, *, msg_id: str | None = None
+    ) -> object:
+        from whatsbot.application.mode_service import ModeChangeOutcome
+        from whatsbot.ports.project_repository import (
+            ProjectNotFoundError as _NotFound,
+        )
+
+        del msg_id
+        if project not in self._current:
+            raise _NotFound(f"no {project}")
+        from_mode = self._current[project]
+        self._current[project] = new_mode  # type: ignore[assignment]
+        self.change_calls.append((project, new_mode))  # type: ignore[arg-type]
+        return ModeChangeOutcome(
+            project_name=project,
+            from_mode=from_mode,
+            to_mode=new_mode,  # type: ignore[arg-type]
+            was_noop=from_mode == new_mode,
+        )
+
+
+def _build_handler_with_mode(
+    *,
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    trash_root: Path,
+    mode_service: _StubModeService,
+) -> CommandHandler:
+    project_repo = SqliteProjectRepository(conn)
+    project_service = ProjectService(
+        repository=project_repo,
+        conn=conn,
+        projects_root=projects_root,
+        git_clone=StubGitClone(),
+    )
+    allow_service = AllowService(
+        rule_repo=SqliteAllowRuleRepository(conn),
+        project_repo=project_repo,
+        projects_root=projects_root,
+    )
+    app_state_repo = SqliteAppStateRepository(conn)
+    active_project = ActiveProjectService(
+        app_state=app_state_repo,
+        projects=project_repo,
+    )
+    delete_service = DeleteService(
+        pending_repo=SqlitePendingDeleteRepository(conn),
+        project_repo=project_repo,
+        app_state=app_state_repo,
+        secrets=StubSecretsProvider(),
+        projects_root=projects_root,
+        trash_root=trash_root,
+    )
+    return CommandHandler(
+        project_service=project_service,
+        allow_service=allow_service,
+        active_project=active_project,
+        delete_service=delete_service,
+        version="0.1.0",
+        started_at_monotonic=time.monotonic(),
+        env="test",
+        mode_service=mode_service,  # type: ignore[arg-type]
+    )
+
+
+def test_mode_without_args_without_active_hints_user(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    handler = _build_handler_with_mode(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        mode_service=_StubModeService(),
+    )
+    result = handler.handle("/mode")
+    assert result.command == "/mode"
+    assert "kein aktives Projekt" in result.reply
+
+
+def test_mode_without_args_shows_current_mode(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    from whatsbot.domain.projects import Mode as _Mode
+
+    mode_service = _StubModeService()
+    mode_service.seed("alpha", _Mode.NORMAL)
+    handler = _build_handler_with_mode(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        mode_service=mode_service,
+    )
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    result = handler.handle("/mode")
+    assert "normal" in result.reply
+    assert "alpha" in result.reply
+
+
+def test_mode_switch_to_strict_goes_through_service(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    from whatsbot.domain.projects import Mode as _Mode
+
+    mode_service = _StubModeService()
+    mode_service.seed("alpha", _Mode.NORMAL)
+    handler = _build_handler_with_mode(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        mode_service=mode_service,
+    )
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+
+    result = handler.handle("/mode strict")
+    assert result.command == "/mode"
+    assert "strict" in result.reply
+    assert "🔵" in result.reply
+    assert mode_service.change_calls == [("alpha", _Mode.STRICT)]
+
+
+def test_mode_switch_noop_reply_says_already(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    from whatsbot.domain.projects import Mode as _Mode
+
+    mode_service = _StubModeService()
+    mode_service.seed("alpha", _Mode.STRICT)
+    handler = _build_handler_with_mode(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        mode_service=mode_service,
+    )
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")
+    result = handler.handle("/mode strict")
+    assert "bereits" in result.reply
+
+
+def test_mode_switch_rejects_bogus_target(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    mode_service = _StubModeService()
+    handler = _build_handler_with_mode(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        mode_service=mode_service,
+    )
+    result = handler.handle("/mode chaos")
+    assert "normal | strict | yolo" in result.reply
+    assert mode_service.change_calls == []

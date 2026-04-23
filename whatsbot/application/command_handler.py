@@ -28,6 +28,10 @@ from whatsbot.application.delete_service import (
     PanicPinNotConfiguredError,
     PendingDeleteExpiredError,
 )
+from whatsbot.application.mode_service import (
+    InvalidModeTransitionError,
+    ModeService,
+)
 from whatsbot.application.project_service import (
     ProjectFilesystemError,
     ProjectService,
@@ -43,6 +47,7 @@ from whatsbot.domain.git_url import DisallowedGitUrlError
 from whatsbot.domain.pending_deletes import CONFIRM_WINDOW_SECONDS
 from whatsbot.domain.projects import (
     InvalidProjectNameError,
+    Mode,
     format_listing,
     validate_project_name,
 )
@@ -61,6 +66,8 @@ _ALLOWLIST_COMMAND: Final = "/allowlist"
 _ALLOW_PREFIX: Final = "/allow "
 _DENY_PREFIX: Final = "/deny "
 _RM_PREFIX: Final = "/rm "
+_MODE_COMMAND: Final = "/mode"
+_MODE_PREFIX: Final = "/mode "
 
 
 class CommandHandler:
@@ -81,6 +88,7 @@ class CommandHandler:
         env: str,
         db_ok_callback: Callable[[], bool] | None = None,
         session_service: SessionService | None = None,
+        mode_service: ModeService | None = None,
     ) -> None:
         self._projects = project_service
         self._allow = allow_service
@@ -91,6 +99,7 @@ class CommandHandler:
         self._env = env
         self._db_ok_callback = db_ok_callback
         self._sessions = session_service
+        self._modes = mode_service
         self._log = get_logger("whatsbot.commands")
 
     # ---- entrypoint -------------------------------------------------------
@@ -121,6 +130,12 @@ class CommandHandler:
         # /rm <name> [<PIN>]
         if cmd.startswith(_RM_PREFIX):
             return self._handle_rm(cmd[len(_RM_PREFIX) :].strip())
+
+        # /mode + /mode <normal|strict|yolo>
+        if cmd == _MODE_COMMAND:
+            return self._handle_show_mode()
+        if cmd.startswith(_MODE_PREFIX):
+            return self._handle_set_mode(cmd[len(_MODE_PREFIX) :].strip())
 
         # Non-slash text → prompt to the active project (Phase-4
         # C4.2c). Empty text falls through to the default help
@@ -508,6 +523,86 @@ class CommandHandler:
             ),
             command="/rm",
         )
+
+    # ---- /mode [normal|strict|yolo] --------------------------------------
+
+    _MODE_EMOJI: Final = {
+        Mode.NORMAL: "🟢",
+        Mode.STRICT: "🔵",
+        Mode.YOLO: "🔴",
+    }
+
+    def _handle_show_mode(self) -> CommandResult:
+        active = self._active.get_active()
+        if active is None:
+            return CommandResult(
+                reply="kein aktives Projekt — setze eines mit /p <name>.",
+                command="/mode",
+            )
+        if self._modes is None:
+            return CommandResult(
+                reply="⚠️ Mode-Service nicht konfiguriert.",
+                command="/mode",
+            )
+        try:
+            mode = self._modes.show_mode(active)
+        except ProjectNotFoundError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/mode")
+        emoji = self._MODE_EMOJI.get(mode, "·")
+        return CommandResult(
+            reply=f"{emoji} {mode.value} ({active})",
+            command="/mode",
+        )
+
+    def _handle_set_mode(self, raw: str) -> CommandResult:
+        target = raw.strip().lower()
+        valid = {m.value for m in Mode}
+        if target not in valid:
+            return CommandResult(
+                reply=(
+                    "Verwendung: /mode (normal | strict | yolo)"
+                ),
+                command="/mode",
+            )
+        active = self._active.get_active()
+        if active is None:
+            return CommandResult(
+                reply="kein aktives Projekt — setze eines mit /p <name>.",
+                command="/mode",
+            )
+        if self._modes is None:
+            return CommandResult(
+                reply="⚠️ Mode-Service nicht konfiguriert.",
+                command="/mode",
+            )
+        target_mode = Mode(target)
+        try:
+            outcome = self._modes.change_mode(active, target_mode)
+        except ProjectNotFoundError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/mode")
+        except InvalidModeTransitionError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/mode")
+        except (TmuxError, FileNotFoundError, OSError) as exc:
+            self._log.error(
+                "mode_switch_failed",
+                project=active,
+                target=target_mode.value,
+                error=str(exc),
+            )
+            return CommandResult(
+                reply=f"⚠️ Mode-Wechsel gescheitert: {exc}",
+                command="/mode",
+            )
+
+        emoji = self._MODE_EMOJI.get(outcome.to_mode, "·")
+        if outcome.was_noop:
+            reply = f"{emoji} bereits {outcome.to_mode.value} ({active})"
+        else:
+            reply = (
+                f"{emoji} {outcome.from_mode.value} → {outcome.to_mode.value} "
+                f"({active})"
+            )
+        return CommandResult(reply=reply, command="/mode")
 
     # ---- helpers ----------------------------------------------------------
 

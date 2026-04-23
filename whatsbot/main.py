@@ -29,6 +29,9 @@ from whatsbot.adapters.sqlite_app_state_repository import (
 from whatsbot.adapters.sqlite_claude_session_repository import (
     SqliteClaudeSessionRepository,
 )
+from whatsbot.adapters.sqlite_mode_event_repository import (
+    SqliteModeEventRepository,
+)
 from whatsbot.adapters.sqlite_pending_confirmation_repository import (
     SqlitePendingConfirmationRepository,
 )
@@ -52,6 +55,7 @@ from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.application.delete_service import DeleteService
 from whatsbot.application.hook_service import HookService
+from whatsbot.application.mode_service import ModeService
 from whatsbot.application.output_service import OutputService
 from whatsbot.application.project_service import ProjectService
 from whatsbot.application.session_service import SessionService
@@ -248,6 +252,17 @@ def create_app(
             session_kwargs["discovery_timeout_seconds"] = discovery_timeout_seconds
         session_service = SessionService(**session_kwargs)  # type: ignore[arg-type]
 
+    # ModeService is constructed only when we have a SessionService to
+    # recycle; /mode without Claude running has no useful semantics.
+    mode_service: ModeService | None = None
+    if session_service is not None:
+        mode_service = ModeService(
+            project_repo=project_repo,
+            session_repo=SqliteClaudeSessionRepository(conn),
+            mode_event_repo=SqliteModeEventRepository(conn),
+            session_service=session_service,
+        )
+
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
@@ -257,6 +272,7 @@ def create_app(
         started_at_monotonic=_started_at_monotonic,
         env=settings.env.value,
         session_service=session_service,
+        mode_service=mode_service,
     )
 
     app = FastAPI(

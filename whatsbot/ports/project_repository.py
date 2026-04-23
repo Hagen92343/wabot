@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from whatsbot.domain.projects import Project
+from whatsbot.domain.projects import Mode, Project
 
 
 class ProjectAlreadyExistsError(ValueError):
@@ -39,3 +39,8 @@ class ProjectRepository(Protocol):
         """Remove the project row. Raises ``ProjectNotFoundError`` if absent."""
 
     def exists(self, name: str) -> bool: ...
+
+    def update_mode(self, name: str, mode: Mode) -> None:
+        """Change only the ``mode`` column. Used by ``/mode`` switches
+        (C4.3) and by the startup YOLO → Normal coercion (C4.7).
+        Raises ``ProjectNotFoundError`` if the row is missing."""

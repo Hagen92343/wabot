@@ -87,3 +87,11 @@ class SqliteProjectRepository:
     def exists(self, name: str) -> bool:
         row = self._conn.execute("SELECT 1 FROM projects WHERE name = ?", (name,)).fetchone()
         return row is not None
+
+    def update_mode(self, name: str, mode: Mode) -> None:
+        cursor = self._conn.execute(
+            "UPDATE projects SET mode = ? WHERE name = ?",
+            (mode.value, name),
+        )
+        if cursor.rowcount == 0:
+            raise ProjectNotFoundError(f"Projekt '{name}' nicht gefunden.")
