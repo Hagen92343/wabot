@@ -59,6 +59,7 @@ from whatsbot.application.mode_service import ModeService
 from whatsbot.application.output_service import OutputService
 from whatsbot.application.project_service import ProjectService
 from whatsbot.application.session_service import SessionService
+from whatsbot.application.startup_recovery import StartupRecovery
 from whatsbot.application.transcript_ingest import TranscriptIngest
 from whatsbot.config import Environment, Settings, assert_secrets_present
 from whatsbot.domain import whitelist
@@ -91,6 +92,7 @@ def create_app(
     transcript_watcher: TranscriptWatcher | None = None,
     claude_home: Path | None = None,
     discovery_timeout_seconds: float | None = None,
+    run_startup_recovery: bool = False,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -304,6 +306,22 @@ def create_app(
     # Exposed for tests that need to drive lifecycle ops from outside
     # the webhook flow (e.g. stop_transcript_watch on teardown).
     app.state.session_service = session_service
+
+    # Phase 4 C4.6 + C4.7 — StartupRecovery coerces YOLO → Normal
+    # (Spec §6 invariant) and calls ensure_started for every row in
+    # claude_sessions so surviving sessions come back up after a
+    # bot restart. Opt-in so pre-existing test paths (which create
+    # ephemeral in-memory DBs with no recoverable sessions) don't
+    # pay the cost.
+    if run_startup_recovery and session_service is not None:
+        recovery = StartupRecovery(
+            project_repo=project_repo,
+            session_repo=SqliteClaudeSessionRepository(conn),
+            mode_event_repo=SqliteModeEventRepository(conn),
+            session_service=session_service,
+        )
+        recovery.run()
+        app.state.startup_recovery = recovery
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, object]:
