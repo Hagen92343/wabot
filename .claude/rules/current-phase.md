@@ -1,8 +1,68 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 6 abgeschlossen ✅ — wartet auf User-Freigabe für Phase 7
-**Aktiver Checkpoint**: — (Phase 6 inhaltlich + close-commit komplett)
-**Letzter abgeschlossener Checkpoint**: Phase-6-Close (CHANGELOG + Sammel-Commit)
+**Aktive Phase**: Phase 7 — Medien-Pipeline (Plan-Doc liegt vor, Code noch nicht begonnen)
+**Aktiver Checkpoint**: **C7.1** — Image-Pipeline + Reject-Pfade
+**Letzter abgeschlossener Checkpoint**: Phase-6-Close + Phase-7-Plan-Doc (`37490ef`)
+**User-Freigabe für Phase 7**: ✅ erteilt (in vorheriger Session)
+
+## Wie ich in der nächsten Session weitermache
+
+1. **Diese Datei lesen** — du bist hier.
+2. **`.claude/rules/phase-7.md` lesen** — Plan-Doc, vom User
+   approved. Dort stehen die 5 Checkpoints + Architektur.
+3. `git log --oneline -22` für den Commit-Stand seit Phase 4 close.
+4. Baseline-Tests grün stellen:
+   ```bash
+   venv/bin/pytest tests/unit/ tests/integration/ \
+     --ignore=tests/unit/test_hook_common.py \
+     --ignore=tests/integration/test_hook_script.py \
+     --ignore=tests/integration/test_hook_fail_closed.py
+   ```
+   Erwartung: **1104/1104 grün**, mypy --strict clean (93 source
+   files), ruff clean.
+5. Mit **C7.1** anfangen — siehe `phase-7.md` Sektion „C7.1".
+   Bottom-up bauen:
+   - `domain/media.py` (MediaKind, MAX_BYTES, ALLOWED_MIMES,
+     validate_*, MediaValidationError)
+   - `domain/magic_bytes.py` (looks_like_image, looks_like_pdf,
+     looks_like_audio)
+   - `ports/media_downloader.py` + `ports/media_cache.py`
+   - `adapters/meta_media_downloader.py` (httpx, 2-step Meta-API)
+   - `adapters/file_media_cache.py` (atomic store + secure_delete)
+   - `application/media_service.py` (process_image,
+     process_unsupported)
+   - `http/meta_webhook.py` (`iter_media_messages` +
+     dispatch + reject-replies)
+   - `main.py` Wiring
+   - Tests pro Layer + 1 e2e
+
+## Pre-existing Schuld (nicht-blockierend für Phase 7)
+
+`claude_sessions.session_id TEXT UNIQUE` kollidiert wenn zwei
+frische Sessions (beide leeren session_id) parallel existieren.
+Das e2e-Pattern aus Phase 6 (Test seedet das zweite Projekt
+DB-direkt) reicht für Tests — Live-Bot ist betroffen wenn ein
+User mehr als ein Projekt frisch startet bevor Claude die erste
+session_id zurückgibt. Fix gehört in einen Phase-4-Cleanup-
+Commit (NULL statt empty oder UNIQUE drop). Wenn das in Phase 7
+stört, vorher fixen.
+
+## Was End-to-End vom Handy aus funktioniert (Stand vor Phase 7)
+
+- **Phase 1–4**: Projekte anlegen (`/new` + `/new git`), aktiv-
+  Projekt setzen (`/p`), Prompts senden (`/p <name> <prompt>`,
+  bare prompt), Mode wechseln (`/mode normal|strict|yolo`),
+  Allow-Rules verwalten (`/allow`, `/deny`, `/allowlist`,
+  `/allow batch *`).
+- **Phase 5**: Lock-Soft-Preemption mit `/release` + PIN-gated
+  `/force`. tmux-Status-Bar zeigt Owner-Badge live.
+- **Phase 6**: Vier Eskalationsstufen: `/stop` (Ctrl+C) →
+  `/kill` (tmux kill-session) → `/panic` (Vollkatastrophe in
+  <2s) → `/unlock <PIN>` (Lockdown aufheben). Heartbeat-Pumper
+  + Watchdog-LaunchAgent als unabhängiger Backstop. Sleep-
+  Awareness (PID-Liveness + Boot-Grace). Lockdown-Filter blockt
+  alle Commands außer `/unlock`/`/help`/`/ping`/`/status`.
+  StartupRecovery skippt bei Lockdown.
 
 ## Phase 6 — laufender Stand (zum Wiederaufnehmen)
 
