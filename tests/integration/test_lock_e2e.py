@@ -39,6 +39,7 @@ from whatsbot.ports.secrets_provider import (
     KEY_ALLOWED_SENDERS,
     KEY_META_APP_SECRET,
     KEY_META_VERIFY_TOKEN,
+    KEY_PANIC_PIN,
     SecretNotFoundError,
 )
 
@@ -79,11 +80,15 @@ class StubSecrets:
         self._store[key] = new_value
 
 
+PANIC_PIN = "1234"
+
+
 def _full_secret_stub() -> StubSecrets:
     base = {key: f"placeholder-for-{key}" for key in ALL_KEYS}
     base[KEY_META_APP_SECRET] = APP_SECRET
     base[KEY_META_VERIFY_TOKEN] = VERIFY_TOKEN
     base[KEY_ALLOWED_SENDERS] = ALLOWED_SENDER
+    base[KEY_PANIC_PIN] = PANIC_PIN
     return StubSecrets(**base)
 
 
@@ -279,3 +284,96 @@ def test_release_clears_local_lock_and_next_prompt_succeeds(
     bodies = [body for _, body in sender.sent]
     assert any("🔓 Lock" in body and project_name in body for body in bodies)
     assert any("📨 an" in body and project_name in body for body in bodies)
+
+
+def test_force_overrides_local_lock_with_pin(
+    tmp_path: Path,
+    tmux_session_cleanup: list[str],
+) -> None:
+    """C5.4 e2e — ``/force <name> <PIN> <prompt>`` over /webhook
+    flips the lock to BOT and ships the prompt; wrong PIN keeps the
+    LOCAL lock and never sends."""
+    project_name = f"lock{uuid.uuid4().hex[:4]}"
+    tmux_session_cleanup.append(f"wb-{project_name}")
+
+    projects_root = tmp_path / "projekte"
+    projects_root.mkdir()
+    db_path = tmp_path / "state.db"
+    conn = sqlite_repo.connect(str(db_path))
+    sqlite_repo.apply_schema(conn)
+
+    sender = RecordingSender()
+    app = create_app(
+        settings=Settings(env=Environment.PROD),
+        secrets_provider=_full_secret_stub(),
+        message_sender=sender,
+        db_connection=conn,
+        projects_root=projects_root,
+        tmux_controller=SubprocessTmuxController(),
+        safe_claude_binary="/bin/true",
+    )
+
+    with TestClient(app) as client:
+        _signed_post(client, _build_meta_payload(f"/new {project_name}"))
+
+        # Pre-seed a fresh local lock from a separate connection.
+        lock_conn = sqlite3.connect(
+            str(db_path), isolation_level=None, check_same_thread=False
+        )
+        lock_conn.row_factory = sqlite3.Row
+        now = datetime.now(UTC)
+        SqliteSessionLockRepository(lock_conn).upsert(
+            SessionLock(
+                project_name=project_name,
+                owner=LockOwner.LOCAL,
+                acquired_at=now - timedelta(seconds=5),
+                last_activity_at=now - timedelta(seconds=5),
+            )
+        )
+        lock_conn.close()
+
+        # 1) Wrong PIN — must reply "Falsche PIN" and leave lock LOCAL.
+        r = _signed_post(
+            client,
+            _build_meta_payload(
+                f"/force {project_name} 9999 hi attacker"
+            ),
+        )
+        assert r.status_code == 200
+
+        verify_conn = sqlite_repo.connect(str(db_path))
+        row = verify_conn.execute(
+            "SELECT owner FROM session_locks WHERE project_name = ?",
+            (project_name,),
+        ).fetchone()
+        verify_conn.close()
+        assert row is not None
+        assert row["owner"] == LockOwner.LOCAL.value
+
+        # 2) Correct PIN — flips lock to BOT and ships the prompt.
+        r = _signed_post(
+            client,
+            _build_meta_payload(
+                f"/force {project_name} {PANIC_PIN} ready now"
+            ),
+        )
+        assert r.status_code == 200
+
+    bodies = [body for _, body in sender.sent]
+    assert any("Falsche PIN" in body for body in bodies)
+    assert any(
+        "🔓 Lock" in body and project_name in body for body in bodies
+    )
+    assert any(
+        "📨 an" in body and project_name in body for body in bodies
+    )
+
+    # Final lock state: BOT.
+    final_conn = sqlite_repo.connect(str(db_path))
+    final_row = final_conn.execute(
+        "SELECT owner FROM session_locks WHERE project_name = ?",
+        (project_name,),
+    ).fetchone()
+    final_conn.close()
+    assert final_row is not None
+    assert final_row["owner"] == LockOwner.BOT.value

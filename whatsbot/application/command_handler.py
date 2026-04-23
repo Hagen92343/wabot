@@ -28,6 +28,7 @@ from whatsbot.application.delete_service import (
     PanicPinNotConfiguredError,
     PendingDeleteExpiredError,
 )
+from whatsbot.application.force_service import ForceService
 from whatsbot.application.lock_service import (
     LocalTerminalHoldsLockError,
     LockService,
@@ -74,6 +75,7 @@ _MODE_COMMAND: Final = "/mode"
 _MODE_PREFIX: Final = "/mode "
 _RELEASE_COMMAND: Final = "/release"
 _RELEASE_PREFIX: Final = "/release "
+_FORCE_PREFIX: Final = "/force "
 
 
 class CommandHandler:
@@ -96,6 +98,7 @@ class CommandHandler:
         session_service: SessionService | None = None,
         mode_service: ModeService | None = None,
         lock_service: LockService | None = None,
+        force_service: ForceService | None = None,
     ) -> None:
         self._projects = project_service
         self._allow = allow_service
@@ -108,6 +111,7 @@ class CommandHandler:
         self._sessions = session_service
         self._modes = mode_service
         self._locks = lock_service
+        self._force = force_service
         self._log = get_logger("whatsbot.commands")
 
     # ---- entrypoint -------------------------------------------------------
@@ -152,6 +156,10 @@ class CommandHandler:
             return self._handle_release(
                 cmd[len(_RELEASE_PREFIX) :].strip()
             )
+
+        # /force <name> <PIN> <prompt> (Phase 5 C5.4)
+        if cmd.startswith(_FORCE_PREFIX):
+            return self._handle_force(cmd[len(_FORCE_PREFIX) :].strip())
 
         # Non-slash text → prompt to the active project (Phase-4
         # C4.2c). Empty text falls through to the default help
@@ -351,8 +359,8 @@ class CommandHandler:
             return CommandResult(
                 reply=(
                     f"🔒 Terminal aktiv auf '{name}'. "
-                    f"Benutze /force {name} <prompt> zum Uebernehmen "
-                    "oder /release zum Freigeben."
+                    f"Benutze /force {name} <PIN> <prompt> zum "
+                    "Uebernehmen oder /release zum Freigeben."
                 ),
                 command=command,
             )
@@ -669,6 +677,87 @@ class CommandHandler:
         return CommandResult(
             reply=f"'{name}' hatte keinen aktiven Lock.",
             command="/release",
+        )
+
+    # ---- /force <name> <PIN> <prompt> (Phase 5 C5.4) ---------------------
+
+    def _handle_force(self, args: str) -> CommandResult:
+        """PIN-gated lock override + prompt delivery (Spec §11).
+
+        Sequence on success:
+
+        1. ``ForceService.force(name, pin)`` validates the project,
+           verifies the PIN against the Keychain ``panic-pin``, and
+           takes the bot lock unconditionally.
+        2. ``SessionService.send_prompt(name, prompt)`` ships the
+           prompt to tmux. Because the bot now owns the lock, the
+           inner ``acquire_for_bot`` round inside ``send_prompt``
+           also succeeds.
+
+        On PIN failure we never touch the lock — the local terminal
+        keeps it.
+        """
+        if self._force is None or self._sessions is None:
+            return CommandResult(
+                reply="⚠️ Force-Service nicht konfiguriert.",
+                command="/force",
+            )
+
+        parts = args.split(maxsplit=2)
+        if len(parts) != 3:
+            return CommandResult(
+                reply=(
+                    "Verwendung:\n"
+                    "  /force <name> <PIN> <prompt>"
+                ),
+                command="/force",
+            )
+
+        raw_name, pin, prompt = parts[0], parts[1], parts[2].strip()
+        if not prompt:
+            return CommandResult(
+                reply="Verwendung: /force <name> <PIN> <prompt>",
+                command="/force",
+            )
+
+        try:
+            outcome = self._force.force(raw_name, pin)
+        except InvalidProjectNameError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/force")
+        except ProjectNotFoundError as exc:
+            return CommandResult(
+                reply=f"⚠️ {exc} Tippe /ls fuer Liste.", command="/force"
+            )
+        except InvalidPinError:
+            return CommandResult(reply="⚠️ Falsche PIN.", command="/force")
+        except PanicPinNotConfiguredError as exc:
+            self._log.error("panic_pin_missing", error=str(exc))
+            return CommandResult(reply=f"⚠️ {exc}", command="/force")
+
+        # Lock is now ours. Hand the prompt off — send_prompt's inner
+        # acquire_for_bot will see the BOT lock and pass through.
+        try:
+            self._sessions.send_prompt(outcome.project_name, prompt)
+        except (TmuxError, FileNotFoundError, OSError) as exc:
+            self._log.error(
+                "force_send_prompt_failed",
+                project=outcome.project_name,
+                error=str(exc),
+            )
+            return CommandResult(
+                reply=(
+                    f"🔓 Lock fuer '{outcome.project_name}' uebernommen, "
+                    "aber Prompt nicht zustellbar."
+                ),
+                command="/force",
+            )
+
+        return CommandResult(
+            reply=(
+                f"🔓 Lock fuer '{outcome.project_name}' uebernommen.\n"
+                f"📨 an {outcome.project_name}: {_preview(prompt)}"
+            ),
+            command="/force",
         )
 
     # ---- helpers ----------------------------------------------------------

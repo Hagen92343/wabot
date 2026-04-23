@@ -1,8 +1,8 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 5 — Input-Lock + Multi-Session (in progress)
-**Aktiver Checkpoint**: **C5.4** — `/force <name> <PIN> <prompt>` (PIN-gated Lock-Override)
-**Letzter abgeschlossener Checkpoint**: C5.3 (Lock-Soft-Preemption End-to-End via /webhook)
+**Aktiver Checkpoint**: **C5.5** — tmux-Status-Bar Lock-Owner-Badge (kosmetisch)
+**Letzter abgeschlossener Checkpoint**: C5.4 (`/force <name> <PIN> <prompt>` PIN-gated Lock-Override)
 
 ## Phase 5 — laufender Stand (zum Wiederaufnehmen)
 
@@ -32,38 +32,53 @@
   preseed local lock → `/p alpha hi` → 🔒-Reply; `/release alpha` →
   Lock weg → `/p alpha hi` funktioniert. Real tmux,
   `safe-claude=/bin/true`. 2 Tests in `test_lock_e2e.py`.
+- ✅ **C5.4** — `/force <name> <PIN> <prompt>` PIN-gated Lock-Override:
+  - `application/force_service.py` — `ForceService.force(name, pin)`:
+    validate name → check project exists (FK-safety) → PIN-Check via
+    `hmac.compare_digest` gegen Keychain-`panic-pin` →
+    `lock_service.force_bot(name)`. Wiederverwendet
+    `InvalidPinError` + `PanicPinNotConfiguredError` aus
+    `delete_service` (gleiche Semantik, gleicher Keychain-Key).
+  - `CommandHandler._handle_force(args)`: parse'd 3 Tokens
+    (`<name> <PIN> <prompt>`, Prompt darf Leerzeichen + weitere
+    PIN-artige Strings enthalten via `split(maxsplit=2)`), bei
+    PIN-Match → `force_service.force` + `session_service.send_prompt`,
+    Reply `🔓 Lock fuer 'name' uebernommen.\n📨 an name: <preview>`.
+    Bei PIN-Miss → `⚠️ Falsche PIN`. Lock bleibt LOCAL bei Fehler.
+  - `_dispatch_prompt`-Hint korrigiert: `/force <name> <PIN> <prompt>`
+    statt der irreführenden alten Version ohne PIN.
+  - `main.py` baut ForceService nur, wenn lock_service + session_service
+    vorhanden sind; wired ins CommandHandler-`force_service`-Param.
+  - 7 unit tests `test_force_service.py` (PIN-Pfade, Project-FK,
+    Constant-Time-Compare, Lock unverändert bei Mismatch).
+  - 12 unit tests `test_force_command.py` (Parsing inkl.
+    Whitespace-Edge, no-config-Guard, Hint-Korrektur-Regression,
+    Idempotenz ohne Vorlock).
+  - 1 e2e test `test_lock_e2e.py::test_force_overrides_local_lock_with_pin`
+    (real tmux, /webhook, signed payload, wrong-PIN → keep LOCAL,
+    right-PIN → flip to BOT + 📨).
 
-**Tests-Stand**: 956/956 passing (941 + 15 Phase-5-Tests).
-mypy `--strict` clean auf allen 79 source files, ruff clean auf
+**Tests-Stand**: 976/976 passing (956 + 20 C5.4-Tests).
+mypy `--strict` clean auf allen 80 source files, ruff clean auf
 allen angefassten Dateien.
 
 ### Was noch offen in Phase 5
 
-- ⏭ **C5.4** — `/force <name> <PIN> <prompt>`: PIN-gated Lock-Override.
-  Nutzt die Keychain-`panic-pin` (wie `/rm`). Logisch:
-  1. Parse `<name> <PIN> <prompt>` (PIN ist die zweite Token).
-  2. Validiere PIN gegen `KEY_PANIC_PIN` via `SecretsProvider`.
-  3. Bei match: `lock_service.force_bot(project)` + `send_prompt(project, prompt)`.
-  4. Bei miss: `⚠️ Falsche PIN`-Reply.
-  CommandHandler.__init__ braucht dafür `SecretsProvider` (oder analog
-  zu `DeleteService` einen neuen `ForceService`). Vorschlag: Wiederverwendung
-  des vorhandenen `DeleteService`-PIN-Musters oder kleine `ForceService`-
-  Hülle, die `SecretsProvider.get(KEY_PANIC_PIN)` einmal liest.
 - ⏭ **C5.5** — tmux-Status-Bar um Lock-Owner-Badge erweitern
   (`🟢 NORMAL · 🤖 BOT [wb-alpha]` / `· 👤 LOCAL` / `· — FREE`).
   Aufruf von `_paint_status_bar` muss den aktuellen Lock lesen
   (`lock_service.current(project)`). Kosmetisch, niedrige Prio.
 - ⏭ **Phase-5-Close-Commit**: `feat(phase-5): complete phase 5`
-  nach C5.4 + C5.5.
+  nach C5.5.
 
 ### Wie wiedereinsteigen
 
 1. Diese Datei lesen.
 2. `.claude/rules/phase-5.md` (Plan-Doc).
-3. `git log --oneline -7` für den Commit-Stand seit Phase 4 close.
+3. `git log --oneline -8` für den Commit-Stand seit Phase 4 close.
 4. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte 956/956 grün zeigen.
-5. Mit **C5.4** starten — siehe Plan oben.
+   sollte 976/976 grün zeigen.
+5. Mit **C5.5** starten — siehe Plan oben.
 
 ## Phase 4 abgeschlossen ✅
 

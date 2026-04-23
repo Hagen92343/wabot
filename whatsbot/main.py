@@ -57,6 +57,7 @@ from whatsbot.application.allow_service import AllowService
 from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.application.delete_service import DeleteService
+from whatsbot.application.force_service import ForceService
 from whatsbot.application.hook_service import HookService
 from whatsbot.application.lock_service import LockService
 from whatsbot.application.mode_service import ModeService
@@ -304,6 +305,18 @@ def create_app(
             session_service=session_service,
         )
 
+    # ForceService backs ``/force <name> <PIN> <prompt>`` (Phase 5 C5.4).
+    # Needs both the lock service (to take over) and the secrets
+    # provider (PIN check). Only meaningful when both halves of the
+    # send path are wired.
+    force_service: ForceService | None = None
+    if lock_service is not None and session_service is not None:
+        force_service = ForceService(
+            lock_service=lock_service,
+            project_repo=project_repo,
+            secrets=secrets_for_router,
+        )
+
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
@@ -315,6 +328,7 @@ def create_app(
         session_service=session_service,
         mode_service=mode_service,
         lock_service=lock_service,
+        force_service=force_service,
     )
 
     app = FastAPI(
