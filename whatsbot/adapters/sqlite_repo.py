@@ -40,11 +40,20 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     ``isolation_level=None`` puts the connection in autocommit so PRAGMA
     statements take effect immediately. Higher layers will wrap multi-step
     operations in explicit ``BEGIN``/``COMMIT``.
+
+    ``check_same_thread=False`` is required because FastAPI dispatches
+    handlers on a worker thread while the connection is opened on the
+    startup thread. SQLite itself is thread-safe (Python's sqlite3
+    module is built in serialized mode); the ``check_same_thread``
+    flag is only a Python-level guard. Single-user, single-connection
+    serial use — no concurrent writers — so no race.
     """
     path_str = ":memory:" if str(db_path) == ":memory:" else str(Path(db_path))
     if path_str != ":memory:":
         Path(path_str).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path_str, isolation_level=None)
+    conn = sqlite3.connect(
+        path_str, isolation_level=None, check_same_thread=False
+    )
     conn.row_factory = sqlite3.Row
     for stmt in PRAGMAS:
         conn.execute(stmt)

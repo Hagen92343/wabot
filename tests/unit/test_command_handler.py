@@ -827,3 +827,220 @@ def test_p_skips_session_service_when_project_invalid(
     assert "⚠️" in result.reply
     # ensure_started must NOT have been called for a non-existent project.
     assert session_service.calls == []
+
+
+# --- /p <name> <prompt> + bare text (C4.2c) ------------------------------
+
+
+class _PromptRecordingSessionService:
+    """Stand-in that records both ensure_started and send_prompt."""
+
+    def __init__(self, *, send_exc: Exception | None = None) -> None:
+        self.ensure_calls: list[str] = []
+        self.send_calls: list[tuple[str, str]] = []
+        self._send_exc = send_exc
+
+    def ensure_started(self, project_name: str) -> None:
+        self.ensure_calls.append(project_name)
+
+    def send_prompt(self, project_name: str, text: str) -> None:
+        self.send_calls.append((project_name, text))
+        if self._send_exc is not None:
+            raise self._send_exc
+
+
+def _build_handler_with_prompt_session(
+    *,
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    trash_root: Path,
+    session_service: _PromptRecordingSessionService,
+) -> CommandHandler:
+    project_repo = SqliteProjectRepository(conn)
+    project_service = ProjectService(
+        repository=project_repo,
+        conn=conn,
+        projects_root=projects_root,
+        git_clone=StubGitClone(),
+    )
+    allow_service = AllowService(
+        rule_repo=SqliteAllowRuleRepository(conn),
+        project_repo=project_repo,
+        projects_root=projects_root,
+    )
+    app_state_repo = SqliteAppStateRepository(conn)
+    active_project = ActiveProjectService(
+        app_state=app_state_repo,
+        projects=project_repo,
+    )
+    delete_service = DeleteService(
+        pending_repo=SqlitePendingDeleteRepository(conn),
+        project_repo=project_repo,
+        app_state=app_state_repo,
+        secrets=StubSecretsProvider(),
+        projects_root=projects_root,
+        trash_root=trash_root,
+    )
+    return CommandHandler(
+        project_service=project_service,
+        allow_service=allow_service,
+        active_project=active_project,
+        delete_service=delete_service,
+        version="0.1.0",
+        started_at_monotonic=time.monotonic(),
+        env="test",
+        session_service=session_service,  # type: ignore[arg-type]
+    )
+
+
+def test_p_with_prompt_sends_without_switching_active(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    session_service = _PromptRecordingSessionService()
+    handler = _build_handler_with_prompt_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    handler.handle("/new alpha")
+    handler.handle("/new beta")
+    handler.handle("/p alpha")  # active = alpha, ensure_started called
+
+    # Now prompt into beta without switching.
+    result = handler.handle("/p beta hallo Welt")
+    assert result.command == "/p"
+    assert "📨" in result.reply
+    assert "beta" in result.reply
+    assert session_service.send_calls == [("beta", "hallo Welt")]
+    # Active pointer is unchanged.
+    follow_up = handler.handle("/p")
+    assert "alpha" in follow_up.reply
+
+
+def test_p_with_multiline_prompt_routes_to_send_prompt(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    session_service = _PromptRecordingSessionService()
+    handler = _build_handler_with_prompt_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    handler.handle("/new alpha")
+    # /p alpha <multi-word>  — any whitespace-separated tail is a prompt.
+    result = handler.handle("/p alpha test this thing please")
+    assert "📨" in result.reply
+    assert session_service.send_calls == [
+        ("alpha", "test this thing please")
+    ]
+
+
+def test_p_with_invalid_project_name_errors(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    session_service = _PromptRecordingSessionService()
+    handler = _build_handler_with_prompt_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    result = handler.handle("/p NoT-VaLiD! hi")
+    assert "⚠️" in result.reply
+    assert session_service.send_calls == []
+
+
+def test_bare_text_routes_to_active_project(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    session_service = _PromptRecordingSessionService()
+    handler = _build_handler_with_prompt_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    handler.handle("/new alpha")
+    handler.handle("/p alpha")  # active = alpha
+
+    result = handler.handle("how are you")
+    assert result.command == "<prompt>"
+    assert "📨" in result.reply
+    assert "alpha" in result.reply
+    assert session_service.send_calls == [("alpha", "how are you")]
+
+
+def test_bare_text_with_no_active_hints_the_user(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    session_service = _PromptRecordingSessionService()
+    handler = _build_handler_with_prompt_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    result = handler.handle("hello there")
+    assert result.command == "<prompt>"
+    assert "kein aktives Projekt" in result.reply
+    assert session_service.send_calls == []
+
+
+def test_bare_text_unknown_slash_command_still_falls_through(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    session_service = _PromptRecordingSessionService()
+    handler = _build_handler_with_prompt_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    # Slash-prefixed text is a command, not a prompt — even
+    # unknown ones must hit the phase-1 router, not send_prompt.
+    result = handler.handle("/notacommand")
+    assert result.command == "<unknown>"
+    assert session_service.send_calls == []
+
+
+def test_send_prompt_tmux_error_surfaces_reply(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    from whatsbot.ports.tmux_controller import TmuxError
+
+    session_service = _PromptRecordingSessionService(
+        send_exc=TmuxError("tmux down")
+    )
+    handler = _build_handler_with_prompt_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    handler.handle("/new alpha")
+    result = handler.handle("/p alpha hi")
+    assert "⚠️" in result.reply
+    assert "alpha" in result.reply
+    # send_prompt was called once; the error didn't swallow it.
+    assert session_service.send_calls == [("alpha", "hi")]
+
+
+def test_send_prompt_unknown_project_for_one_shot_errors(
+    conn: sqlite3.Connection, projects_root: Path, trash_root: Path
+) -> None:
+    from whatsbot.ports.project_repository import ProjectNotFoundError
+
+    session_service = _PromptRecordingSessionService(
+        send_exc=ProjectNotFoundError("ghost not here")
+    )
+    handler = _build_handler_with_prompt_session(
+        conn=conn,
+        projects_root=projects_root,
+        trash_root=trash_root,
+        session_service=session_service,
+    )
+    result = handler.handle("/p ghost hi")
+    assert "⚠️" in result.reply
+    assert "/ls" in result.reply

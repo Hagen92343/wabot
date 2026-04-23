@@ -1,8 +1,10 @@
 """SessionService — lifecycle Use-Cases for Claude sessions in tmux.
 
-Phase-4 C4.1d scope: ``ensure_started(project_name)``. That's the one
-entry point ``/p <name>`` needs right now. Recycle, send_prompt,
-on_turn_complete land in later checkpoints (C4.2 ff.).
+Phase-4 C4.1d introduced ``ensure_started(project_name)``; C4.2c
+adds ``send_prompt(project_name, text)`` which wraps the same
+idempotent startup with injection sanitisation + Zero-Width-Space
+bot-prefix (Spec §9) + tmux send_keys. ``on_turn_complete`` /
+``recycle`` land in later C4.2+ checkpoints.
 
 Flow of ``ensure_started``:
 
@@ -26,10 +28,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+from whatsbot.domain.injection import sanitize
 from whatsbot.domain.launch import build_claude_argv, render_command_line
 from whatsbot.domain.modes import mode_badge, status_bar_color
 from whatsbot.domain.projects import Mode
 from whatsbot.domain.sessions import ClaudeSession, tmux_session_name
+from whatsbot.domain.transcript import BOT_PREFIX
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.claude_session_repository import ClaudeSessionRepository
 from whatsbot.ports.project_repository import ProjectRepository
@@ -117,6 +121,58 @@ class SessionService:
             resumed=bool(session.session_id),
         )
         return session
+
+    def send_prompt(self, project_name: str, text: str) -> None:
+        """Deliver a user prompt into the project's Claude session.
+
+        Steps:
+
+        1. ``ensure_started`` — tmux + Claude are up, DB row present.
+        2. Sanitize via ``domain.injection.sanitize``: if the prompt
+           contains an injection telegraph *and* the project is in
+           Normal mode, the text is wrapped in ``<untrusted_content>``
+           tags. Strict and YOLO bypass the wrap (Spec §9).
+        3. Prefix with Zero-Width-Space (Spec §9) so the transcript
+           watcher can later distinguish bot-originated user turns
+           from ones the human typed into the pane directly.
+        4. ``tmux.send_text`` lands the prompt in the pane.
+
+        The response — when Claude finishes its turn — is shipped
+        to WhatsApp via the transcript-ingest path (C4.2d), not
+        from this method. ``send_prompt`` returns once the prompt
+        has been handed to tmux; the user sees an acknowledgement
+        handled by the command layer.
+        """
+        session = self.ensure_started(project_name)
+
+        result = sanitize(text, mode=session.current_mode)
+        if result.suspected:
+            # Mirror the format already emitted by the /webhook
+            # middleware so audit reviews have one coherent event
+            # shape. ``mode`` tells forensics whether the wrap
+            # actually took effect (Normal) or was bypassed
+            # (Strict/YOLO).
+            self._log.warning(
+                "injection_suspected",
+                project=project_name,
+                mode=session.current_mode.value,
+                triggers=list(result.triggers),
+                wrapped=(result.text != text),
+                text_len=len(text),
+            )
+
+        prefixed = BOT_PREFIX + result.text
+        tmux_name = tmux_session_name(project_name)
+        self._tmux.send_text(tmux_name, prefixed)
+
+        self._log.info(
+            "prompt_sent",
+            project=project_name,
+            mode=session.current_mode.value,
+            tmux_session=tmux_name,
+            text_len=len(text),
+            injection_suspected=result.suspected,
+        )
 
     # ---- internals ----------------------------------------------------
 

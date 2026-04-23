@@ -44,6 +44,7 @@ from whatsbot.domain.pending_deletes import CONFIRM_WINDOW_SECONDS
 from whatsbot.domain.projects import (
     InvalidProjectNameError,
     format_listing,
+    validate_project_name,
 )
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.project_repository import (
@@ -107,7 +108,7 @@ class CommandHandler:
         if cmd == _P_COMMAND:
             return self._handle_show_active()
         if cmd.startswith(_P_PREFIX):
-            return self._handle_set_active(cmd[len(_P_PREFIX) :].strip())
+            return self._handle_p_args(cmd[len(_P_PREFIX) :].strip())
 
         # Allow rules
         if cmd == _ALLOWLIST_COMMAND:
@@ -120,6 +121,14 @@ class CommandHandler:
         # /rm <name> [<PIN>]
         if cmd.startswith(_RM_PREFIX):
             return self._handle_rm(cmd[len(_RM_PREFIX) :].strip())
+
+        # Non-slash text → prompt to the active project (Phase-4
+        # C4.2c). Empty text falls through to the default help
+        # response so /webhook never ships a zero-length reply.
+        if cmd and not cmd.startswith("/"):
+            routed = self._handle_bare_prompt(cmd)
+            if routed is not None:
+                return routed
 
         # Phase-1 commands fall through to the pure router.
         return commands.route(cmd, self._snapshot())
@@ -217,6 +226,19 @@ class CommandHandler:
             command="/p",
         )
 
+    def _handle_p_args(self, args: str) -> CommandResult:
+        """Route ``/p <name> [<prompt>...]`` — one word switches active,
+        multi-word forwards the prompt to <name>'s session without
+        changing the active pointer (Spec §11 ``/p <n> <prompt>``).
+        """
+        parts = args.split(maxsplit=1)
+        if len(parts) == 1:
+            return self._handle_set_active(parts[0])
+        raw_name, prompt = parts[0], parts[1].strip()
+        if not prompt:
+            return self._handle_set_active(raw_name)
+        return self._handle_project_prompt(raw_name, prompt)
+
     def _handle_set_active(self, raw_name: str) -> CommandResult:
         try:
             name = self._active.set_active(raw_name)
@@ -245,6 +267,66 @@ class CommandHandler:
         return CommandResult(
             reply=f"▶ aktiv: {name}{suffix}",
             command="/p",
+        )
+
+    def _handle_project_prompt(
+        self, raw_name: str, prompt: str
+    ) -> CommandResult:
+        """``/p <name> <prompt>`` — send a one-shot prompt to ``<name>``
+        without switching the active project pointer. Spec §11."""
+        try:
+            name = validate_project_name(raw_name)
+        except InvalidProjectNameError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/p")
+        return self._dispatch_prompt(name, prompt, command="/p")
+
+    def _handle_bare_prompt(self, text: str) -> CommandResult | None:
+        """Non-slash text → forward to active project's Claude session.
+        Returns ``None`` when there's no session_service wired, so the
+        caller falls through to the default help hint (keeps older
+        test paths working)."""
+        if self._sessions is None:
+            return None
+        active = self._active.get_active()
+        if active is None:
+            return CommandResult(
+                reply=(
+                    "kein aktives Projekt. Setze eines mit /p <name> oder "
+                    "prompte direkt: /p <name> <prompt>."
+                ),
+                command="<prompt>",
+            )
+        return self._dispatch_prompt(active, text, command="<prompt>")
+
+    def _dispatch_prompt(
+        self, name: str, prompt: str, *, command: str
+    ) -> CommandResult:
+        if self._sessions is None:
+            # Session service not wired — treat the prompt as a no-op
+            # with a visible hint rather than silently swallowing it.
+            return CommandResult(
+                reply="⚠️ Claude-Session nicht konfiguriert.",
+                command=command,
+            )
+        try:
+            self._sessions.send_prompt(name, prompt)
+        except ProjectNotFoundError as exc:
+            return CommandResult(
+                reply=f"⚠️ {exc} Tippe /ls fuer Liste.", command=command
+            )
+        except (TmuxError, FileNotFoundError, OSError) as exc:
+            self._log.error(
+                "send_prompt_failed",
+                project=name,
+                error=str(exc),
+            )
+            return CommandResult(
+                reply=f"⚠️ Prompt an '{name}' nicht zustellbar.",
+                command=command,
+            )
+        return CommandResult(
+            reply=f"📨 an {name}: {_preview(prompt)}",
+            command=command,
         )
 
     # ---- /allow + /deny + /allowlist + /allow batch * --------------------
@@ -439,3 +521,22 @@ class CommandHandler:
 
     def _snapshot_with(self, **overrides: object) -> StatusSnapshot:
         return replace(self._snapshot(), **overrides)  # type: ignore[arg-type]
+
+
+# ---- prompt-ack preview helper ------------------------------------------
+
+
+_PROMPT_PREVIEW_CHARS: Final = 60
+
+
+def _preview(text: str) -> str:
+    """Single-line, ≤60 char preview of a prompt for the /p ack.
+
+    Prompts can be long or multi-line — the ack is a confirmation,
+    not a mirror of the full text. Newlines collapse to spaces so
+    the WhatsApp render stays tight.
+    """
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= _PROMPT_PREVIEW_CHARS:
+        return collapsed
+    return collapsed[: _PROMPT_PREVIEW_CHARS - 1] + "…"

@@ -171,11 +171,17 @@ def test_help_fixture_routes_to_help_reply() -> None:
 
 
 def test_unknown_command_still_replies_with_hint() -> None:
+    """Phase 4 changes the semantics: bare (non-slash) text is now a
+    prompt intended for the active project, not an "unknown command".
+    When no project is active, the reply hints at ``/p <name>``
+    rather than at ``/help``."""
     client, sender = _make_client()
     response = _signed_post(client, "meta_unknown_command")
     assert response.status_code == 200
     assert len(sender.sent) == 1
-    assert "/help" in sender.sent[0][1]
+    body = sender.sent[0][1]
+    assert "kein aktives Projekt" in body
+    assert "/p" in body
 
 
 def test_unknown_sender_is_silently_dropped() -> None:
