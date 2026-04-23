@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.__DOMAIN__.whatsbot.watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__REPO_DIR__/bin/watchdog.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_DIR__</string>
+
+    <!-- Run at load AND every 30 s thereafter. Each invocation is a
+         single short-lived shell — much more robust against script
+         crashes than a long-running loop. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>30</integer>
+
+    <!-- Don't restart on every exit (the watchdog exits cleanly per
+         invocation by design). -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>__PATH__</string>
+        <key>WHATSBOT_HEARTBEAT</key>
+        <string>/tmp/whatsbot-heartbeat</string>
+        <key>WHATSBOT_PANIC_MARKER</key>
+        <string>/tmp/whatsbot-PANIC</string>
+        <key>WHATSBOT_WATCHDOG_LOG</key>
+        <string>__LOG_DIR__/watchdog.jsonl</string>
+        <key>WHATSBOT_WATCHDOG_STALE_SECONDS</key>
+        <string>120</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/launchd-watchdog-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/launchd-watchdog-stderr.log</string>
+</dict>
+</plist>

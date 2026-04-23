@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Final
 
@@ -18,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
 import whatsbot
+from whatsbot.adapters.file_heartbeat_writer import FileHeartbeatWriter
 from whatsbot.adapters.keychain_provider import KeychainProvider
 from whatsbot.adapters.osascript_notifier import OsascriptNotifier
 from whatsbot.adapters.redacting_sender import RedactingMessageSender
@@ -62,6 +65,7 @@ from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.application.delete_service import DeleteService
 from whatsbot.application.force_service import ForceService
+from whatsbot.application.heartbeat_pumper import HeartbeatPumper
 from whatsbot.application.hook_service import HookService
 from whatsbot.application.kill_service import KillService
 from whatsbot.application.lock_service import LockService
@@ -80,6 +84,7 @@ from whatsbot.http.meta_webhook import build_router as build_webhook_router
 from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddleware
 from whatsbot.logging_setup import configure_logging, get_logger
 from whatsbot.ports.git_clone import GitClone
+from whatsbot.ports.heartbeat_writer import HeartbeatWriter
 from whatsbot.ports.message_sender import MessageSender
 from whatsbot.ports.notification_sender import NotificationSender
 from whatsbot.ports.process_killer import ProcessKiller
@@ -109,6 +114,8 @@ def create_app(
     run_startup_recovery: bool = False,
     process_killer: ProcessKiller | None = None,
     notifier: NotificationSender | None = None,
+    heartbeat_writer: HeartbeatWriter | None = None,
+    enable_heartbeat: bool | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -406,10 +413,38 @@ def create_app(
         panic_service=panic_service,
     )
 
+    # Phase 6 C6.4 — HeartbeatPumper. Auto-on in prod/dev (writes to
+    # the spec-§4 path), opt-in via ``enable_heartbeat=True`` in tests
+    # (most tests don't need a background loop scribbling to /tmp).
+    pumper: HeartbeatPumper | None = None
+    should_heartbeat = (
+        enable_heartbeat
+        if enable_heartbeat is not None
+        else settings.env is not Environment.TEST
+    )
+    if should_heartbeat:
+        writer = (
+            heartbeat_writer
+            if heartbeat_writer is not None
+            else FileHeartbeatWriter(settings.heartbeat_path)
+        )
+        pumper = HeartbeatPumper(writer=writer)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        if pumper is not None:
+            await pumper.start()
+        try:
+            yield
+        finally:
+            if pumper is not None:
+                await pumper.stop()
+
     app = FastAPI(
         title="whatsbot",
         version=whatsbot.__version__,
         description="Persoenlicher WhatsApp-Bot zur Fernsteuerung von Claude Code (single user).",
+        lifespan=lifespan,
     )
     # Constant-time padding for /webhook only — avoids slowing /health probes.
     # Spec §5: rejected webhook requests must take the same time as accepted

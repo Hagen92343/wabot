@@ -1,8 +1,8 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 6 — Kill-Switch + Watchdog + Sleep-Handling (in progress)
-**Aktiver Checkpoint**: **C6.4** — Heartbeat-Pumper + Watchdog-LaunchAgent
-**Letzter abgeschlossener Checkpoint**: C6.2/C6.3 (`/panic` + YOLO-Reset + Lockdown)
+**Aktiver Checkpoint**: **C6.5** — pmset Sleep/Wake-Handling (kosmetisch in Phase 6, vermeidet false-positive watchdog-Trigger nach Mac-Sleep)
+**Letzter abgeschlossener Checkpoint**: C6.4 (Heartbeat-Pumper + Watchdog-LaunchAgent)
 
 ## Phase 6 — laufender Stand (zum Wiederaufnehmen)
 
@@ -90,21 +90,70 @@
     Rows, Lockdown engaged in DB, Touch-File auf Disk,
     `safe-claude` kommt im Killer-Pattern an).
 
-**Tests-Stand**: 1044/1044 passing (1015 + 29 C6.2/C6.3-Tests).
-mypy `--strict` clean auf allen 88 source files, ruff clean auf
+- ✅ **C6.4** — Heartbeat-Pumper + Watchdog-LaunchAgent:
+  - `domain/heartbeat.py` (pure): `HEARTBEAT_INTERVAL_SECONDS=30`,
+    `HEARTBEAT_STALE_AFTER_SECONDS=120`, `is_heartbeat_stale`,
+    `format_heartbeat_payload` (header + version + pid + ISO ts).
+  - `ports/heartbeat_writer.py` + `adapters/file_heartbeat_writer.py`
+    — atomic write (`<path>.tmp` → `os.replace`), parent-dir auto-
+    create, `last_mtime`, idempotent `remove`.
+  - `application/heartbeat_pumper.py` — async background loop:
+    erste Schreibung sofort in `start()` (Watchdog sieht das File
+    bei t=0, nicht erst nach 30 s), File-IO über `asyncio.to_thread`
+    damit der event loop nie blockiert, Schreibfehler werden
+    geloggt aber brechen die Loop nie. `stop()` cancelt sauber +
+    löscht das File (damit ein Restart kein stale-mtime sieht).
+  - `main.create_app(heartbeat_writer=..., enable_heartbeat=...)`
+    + FastAPI `lifespan`-Context: in PROD/DEV automatisch on
+    (FileHeartbeatWriter gegen `settings.heartbeat_path`), in TEST
+    opt-in. TestClient-Lifespan startet/stoppt den Pumper.
+  - `bin/watchdog.sh` — bash-only (kein Python — funktioniert auch
+    bei kaputtem venv): liest heartbeat-mtime via portable
+    `stat -f %m` / `stat -c %Y` Fallback, kurz-circuited bei
+    panic-Marker, killt nur `wb-*` tmux-Sessions (nicht foreign
+    sessions), `pkill -9 -f safe-claude` als Backstop, schreibt
+    panic-Marker damit der Bot nach Restart in Lockdown bleibt,
+    feuert macOS-Notification, JSON-strukturiertes Logging.
+    Konfigurierbar via Env-Vars (heartbeat path, panic marker,
+    threshold, log path, tmux/pkill/notifier binaries).
+  - `launchd/com.DOMAIN.whatsbot.watchdog.plist.template` — neue
+    LaunchAgent-Plist: `RunAtLoad=true` + `StartInterval=30`,
+    `KeepAlive=false` (Skript ist short-lived per invocation).
+    Env-Vars für die Pfade.
+  - `bin/render-launchd.sh` rollt jetzt **drei** Plists raus
+    (Bot + Backup + Watchdog), validiert + boostraps + enabled
+    sie alle. `make undeploy-launchd` cleant alle drei.
+  - 8 unit `test_heartbeat.py` (alle Stale-Edges, Payload-Format,
+    Konstanten-Sanity).
+  - 8 unit `test_file_heartbeat_writer.py` (atomicity-Trace via
+    no-tmp-sibling, parent-dir-auto-create, idempotent remove).
+  - 9 unit `test_heartbeat_pumper.py` (asyncio): start-idempotent,
+    erst-Schreibung in start, stop cancelt + entfernt, write-failure
+    crasht Loop nicht, remove-failure brecht stop nicht ab,
+    Payload-Format inkl. pid/version/ts.
+  - 8 integration `test_watchdog_script.py`: subprocess-getestet
+    mit no-op-Stubs auf PATH (tmux/pkill/osascript) — alive-/
+    stale-Pfade, panic-Marker-Short-Circuit, only-wb-*-Killing,
+    panic-Marker-Touch, Notification, JSON-Log-Format.
+  - 1 integration `test_heartbeat_lifespan.py`: TestClient → File
+    appears bei startup, verschwindet bei shutdown.
+
+**Tests-Stand**: 1077/1077 passing (1044 + 33 C6.4-Tests).
+mypy `--strict` clean auf allen 92 source files, ruff clean auf
 allen angefassten Dateien.
 
-**Pre-existing Schuld (außerhalb C6.2-Scope)**:
+**Pre-existing Schuld (unverändert, außerhalb Phase-6-Scope)**:
 `claude_sessions.session_id TEXT UNIQUE` kollidiert wenn zwei
-frische Sessions beide leeren session_id haben. e2e umgeht das
-indem nur eine wb-*-Session per /p hochgefahren wird; das
-zweite YOLO-Projekt wird DB-direkt geseedet. Fix gehört in
+frische Sessions beide leeren session_id haben. Fix gehört in
 einen Phase-4-Cleanup-Commit (NULL statt empty oder UNIQUE drop).
 
 ### Was noch offen in Phase 6
 
-- ⏭ **C6.4** — Heartbeat-Pumper + Watchdog-LaunchAgent.
-- ⏭ **C6.5** — pmset Sleep/Wake-Handling.
+- ⏭ **C6.5** — pmset Sleep/Wake-Handling. Aktuell triggert ein
+  langer Mac-Sleep den Watchdog einmal (Heartbeat wird stale).
+  Lockdown stoppt dann sauber alles bis zum `/unlock`. Akzeptabel
+  als kosmetisch/niedrig-prio — ein Sleep-Aware-Watchdog käme mit
+  pmset-event-Parsing oder einfacherem long-Threshold-Fallback.
 - ⏭ **C6.6** — `/unlock <PIN>` + Lockdown-Filter im CommandHandler.
 - ⏭ **C6.7** — Edge-Cases.
 
@@ -112,10 +161,11 @@ einen Phase-4-Cleanup-Commit (NULL statt empty oder UNIQUE drop).
 
 1. Diese Datei lesen.
 2. `.claude/rules/phase-6.md` (Plan-Doc).
-3. `git log --oneline -14` für den Commit-Stand.
+3. `git log --oneline -16` für den Commit-Stand.
 4. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte 1044/1044 grün zeigen.
-5. Mit **C6.4** starten — siehe Plan oben (Heartbeat + Watchdog).
+   sollte 1077/1077 grün zeigen.
+5. Mit **C6.5** (pmset Sleep-Awareness, kosmetisch) oder direkt
+   mit **C6.6** (`/unlock` + Lockdown-Filter) starten — siehe Plan.
 
 ## Phase 5 — laufender Stand (zum Wiederaufnehmen)
 

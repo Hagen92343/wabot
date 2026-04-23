@@ -38,6 +38,7 @@ deploy)
 
   BOT_PLIST="$LAUNCH_DIR/com.${DOMAIN}.whatsbot.plist"
   BAK_PLIST="$LAUNCH_DIR/com.${DOMAIN}.whatsbot.backup.plist"
+  WD_PLIST="$LAUNCH_DIR/com.${DOMAIN}.whatsbot.watchdog.plist"
 
   bold "Rendering plists for domain '${DOMAIN}' (env=${ENV_NAME}, port=${PORT})"
   sed \
@@ -60,8 +61,16 @@ deploy)
     -e "s|__HOME__|${HOME}|g" \
     "${REPO_DIR}/launchd/com.DOMAIN.whatsbot.backup.plist.template" > "$BAK_PLIST"
 
+  sed \
+    -e "s|__DOMAIN__|${DOMAIN}|g" \
+    -e "s|__REPO_DIR__|${REPO_DIR}|g" \
+    -e "s|__LOG_DIR__|${LOG_DIR}|g" \
+    -e "s|__PATH__|${USER_PATH}|g" \
+    -e "s|__HOME__|${HOME}|g" \
+    "${REPO_DIR}/launchd/com.DOMAIN.whatsbot.watchdog.plist.template" > "$WD_PLIST"
+
   # Validate that nothing was left unfilled — refuse to load broken plists.
-  for f in "$BOT_PLIST" "$BAK_PLIST"; do
+  for f in "$BOT_PLIST" "$BAK_PLIST" "$WD_PLIST"; do
     if grep -q '__[A-Z_]\+__' "$f"; then
       red "Unfilled placeholders in $f"
       exit 1
@@ -76,19 +85,24 @@ deploy)
   # Idempotent: bootout previous instance if any (suppress 'No such process').
   launchctl bootout "${DOMAIN_TGT}/com.${DOMAIN}.whatsbot" 2>/dev/null || true
   launchctl bootout "${DOMAIN_TGT}/com.${DOMAIN}.whatsbot.backup" 2>/dev/null || true
+  launchctl bootout "${DOMAIN_TGT}/com.${DOMAIN}.whatsbot.watchdog" 2>/dev/null || true
 
   launchctl bootstrap "${DOMAIN_TGT}" "$BOT_PLIST"
   launchctl bootstrap "${DOMAIN_TGT}" "$BAK_PLIST"
+  launchctl bootstrap "${DOMAIN_TGT}" "$WD_PLIST"
   launchctl enable "${DOMAIN_TGT}/com.${DOMAIN}.whatsbot"
   launchctl enable "${DOMAIN_TGT}/com.${DOMAIN}.whatsbot.backup"
+  launchctl enable "${DOMAIN_TGT}/com.${DOMAIN}.whatsbot.watchdog"
   launchctl kickstart -k "${DOMAIN_TGT}/com.${DOMAIN}.whatsbot"
 
   green "✅ Deployed:"
-  green "   com.${DOMAIN}.whatsbot         (RunAtLoad, KeepAlive on crash)"
-  green "   com.${DOMAIN}.whatsbot.backup  (daily 03:00)"
-  echo  "   Bot plist:    $BOT_PLIST"
-  echo  "   Backup plist: $BAK_PLIST"
-  echo  "   Logs:         $LOG_DIR/"
+  green "   com.${DOMAIN}.whatsbot           (RunAtLoad, KeepAlive on crash)"
+  green "   com.${DOMAIN}.whatsbot.backup    (daily 03:00)"
+  green "   com.${DOMAIN}.whatsbot.watchdog  (every 30 s, dead-man's-switch)"
+  echo  "   Bot plist:      $BOT_PLIST"
+  echo  "   Backup plist:   $BAK_PLIST"
+  echo  "   Watchdog plist: $WD_PLIST"
+  echo  "   Logs:           $LOG_DIR/"
   ;;
 
 undeploy)
@@ -99,11 +113,13 @@ undeploy)
 
   launchctl bootout "${DOMAIN_TGT}/com.${DOMAIN}.whatsbot" 2>/dev/null || true
   launchctl bootout "${DOMAIN_TGT}/com.${DOMAIN}.whatsbot.backup" 2>/dev/null || true
+  launchctl bootout "${DOMAIN_TGT}/com.${DOMAIN}.whatsbot.watchdog" 2>/dev/null || true
 
   rm -f "${LAUNCH_DIR}/com.${DOMAIN}.whatsbot.plist"
   rm -f "${LAUNCH_DIR}/com.${DOMAIN}.whatsbot.backup.plist"
+  rm -f "${LAUNCH_DIR}/com.${DOMAIN}.whatsbot.watchdog.plist"
 
-  green "✅ Undeployed: com.${DOMAIN}.whatsbot[.backup]"
+  green "✅ Undeployed: com.${DOMAIN}.whatsbot[.backup,.watchdog]"
   ;;
 
 *)
