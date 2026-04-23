@@ -1,9 +1,10 @@
 # Aktueller Stand
 
 **Projekt-Status**: **Phase 1-9 komplett ✅** — Build-Phase zu Ende.
-**Live-Deployment läuft** nach `docs/INSTALL.md`.
+**Live-Deployment läuft** nach `docs/INSTALL.md`. Ein Impl-Debt-
+Blocker gefunden, siehe unten.
 
-## Deployment-Stand (Stand 2026-04-23)
+## Deployment-Stand (Stand 2026-04-23 abend)
 
 Abgeschlossen:
 - ✅ **Schritt 1** — Brew-Pakete installiert (python@3.12, tmux,
@@ -18,27 +19,89 @@ Abgeschlossen:
   Verify Token, Access Token, Phone Number ID).
 - ✅ **Schritt 6** — `make setup-secrets` durch, alle 7 Keychain-
   Einträge gesetzt (inkl. panic-pin + hook-shared-secret).
+- ✅ **Schritt 7** — Cloudflare Named Tunnel `whatsbot` läuft
+  systemweit als root (pid 71253, `/etc/cloudflared/config.yml`),
+  via `sudo cloudflared service install`. Ingress:
+  `bot.lhconsulting.services` → `http://127.0.0.1:8000`. User-
+  Config unter `~/.cloudflared/config.yml` (gleiche Route).
+  `curl https://bot.lhconsulting.services/health` → 200.
+- ✅ **Schritt 8** — Drei LaunchAgents aktiv: `com.local.whatsbot`,
+  `com.local.whatsbot.watchdog`, `com.local.whatsbot.backup`. Bot
+  bindet sauber auf `127.0.0.1:8000`.
+- ✅ **Schritt 9** — Meta-Webhook in Developer Console
+  eingetragen. `subscribe_challenge_ok` 2026-04-23T20:23:57Z —
+  Verify-Handshake grün. Subscription auf `messages` aktiv,
+  eigene Handy-Nummer als Test-Recipient eingetragen.
+- ✅ **Schritt 11 (Inbound-Seite)** — erster echter `/ping` vom
+  Handy kam an, wurde zum `command_routed`-Event, Reply
+  `pong · v0.1.0 · uptime 105s` wurde generiert (siehe
+  `app.jsonl` um 2026-04-23T21:05:44Z).
 
-Offen, **morgen hier weitermachen**:
-- ⏭ **Schritt 7** — Cloudflare Tunnel. `cloudflared tunnel login`,
-  `tunnel create whatsbot`, dann entweder
-  `cloudflared tunnel --url http://127.0.0.1:8000 run whatsbot`
-  (quick-path via trycloudflare.com) oder Config-Datei + eigene
-  Domain (siehe `docs/INSTALL.md §7`).
-- ⏭ **Schritt 8** — `make deploy-launchd DOMAIN=local`, dann
-  `launchctl list | grep whatsbot` → drei Einträge erwartet.
-  `tail -f ~/Library/Logs/whatsbot/app.jsonl` bis
-  `startup_complete`.
-- ⏭ **Schritt 9** — Meta-Webhook-URL eintragen in der Meta-
-  Developer-Konsole: Callback-URL + Verify-Token, `messages`
-  abonnieren.
+Offen:
 - ⏭ **Schritt 10** — SIM-Port-Lock beim Carrier aktivieren
-  (Spec §24, gegen SIM-Swap).
-- ⏭ **Schritt 11** — Erster `/ping` vom Handy. Erwartete Antwort:
-  `pong · 0.1.0 · uptime 0d 0h 0m · env prod`.
+  (Spec §24, gegen SIM-Swap). User-Action, Spec-Pflicht vor
+  Produktiv-Betrieb.
+- ⏭ **Schritt 11 (Outbound-Seite)** — Die Reply erreicht das
+  Handy noch nicht, weil `WhatsAppCloudSender` ungebaut ist
+  (siehe Impl-Debt unten).
 
-**Nächster Schritt morgen**: `docs/INSTALL.md §7` öffnen und mit
-dem Cloudflare-Tunnel anfangen.
+## Impl-Debt: WhatsAppCloudSender ist Phase-1-Skelett
+
+**Fundstelle**: `whatsbot/adapters/whatsapp_sender.py:60` —
+`WhatsAppCloudSender.send_text` wirft bewusst
+`NotImplementedError` mit dem Kommentar *"Phase-1 skeleton … real
+implementation deferred to C2.x"*. Das Deferral wurde weder in
+Phase 2 noch in 3–9 eingelöst. Alle Integration-Tests + der
+Phase-9-Smoke laufen gegen den `LoggingMessageSender`, weshalb
+das nie aufgefallen ist.
+
+**Konsequenz**: `main.py:200-202` wählt default
+`LoggingMessageSender()` — der Bot empfängt Meta-Webhooks,
+verarbeitet Commands, rendert Replies, **loggt** sie als
+`outbound_message_dev`, schickt aber nie einen HTTP-Call an
+`graph.facebook.com`. Aus Handy-Sicht: Bot schweigt.
+
+**Fix-Plan für morgen (neue Mini-Phase, Arbeitstitel Phase 10
+oder Phase 9.1)**:
+1. `WhatsAppCloudSender.send_text` implementieren: httpx-POST
+   gegen `https://graph.facebook.com/v23.0/{phone_number_id}/
+   messages` mit Bearer-Auth, Body
+   `{messaging_product:"whatsapp", to, type:"text", text:{body}}`.
+   Der `@resilient(META_SEND_SERVICE)`-Decorator sitzt schon
+   drauf — Retry + Circuit-Breaker greifen automatisch.
+2. `main.py` sender-Auswahl: prod + `meta-access-token` + `meta-
+   phone-number-id` im Keychain → `WhatsAppCloudSender`; sonst
+   `LoggingMessageSender`. Keine Env-Flags — reine Fact-based-
+   Wahl aus Settings.
+3. Unit-Tests via httpx MockTransport (happy-path, 4xx, 5xx,
+   timeout → retry → circuit-trip). Pattern analog zu den
+   Phase-7-MediaDownloader-Tests.
+4. Ein Integration-Test gegen echtes Meta (skipped wenn
+   `WHATSBOT_LIVE_META` nicht gesetzt) — der sendet einen
+   Test-Body an die eigene Handy-Nummer.
+5. CHANGELOG + `current-phase.md` schließen. Dann Live-Re-Test
+   mit `/ping` vom Handy → Reply am Handy sehen.
+
+## Heutige Betriebs-Anpassung (nicht-Code)
+
+- **Keychain `allowed-senders` normalisiert**: Meta liefert die
+  Absender-Nummer ohne `+` (`491716598519`). Ursprünglicher
+  Keychain-Eintrag `+491716598519,+4915228995372` hat
+  `sender_not_allowed` getriggert. Per `security add-generic-
+  password -U` auf `491716598519,4915228995372` gestellt, Bot
+  reloaded, danach `command_routed` grün.
+- **Follow-up**: `whatsbot/domain/whitelist.py::is_allowed` macht
+  bewusst exakten String-Match („no + optional" laut Dokstring).
+  Realität widerspricht dem Kommentar. Entweder Dokstring +
+  INSTALL.md klarstellen (Format ohne `+`), oder Normalisierung
+  auf beiden Seiten einbauen (`sender.lstrip('+')` in
+  `parse_whitelist` + `is_allowed`). Low-priority, nicht-
+  blockierend, Entscheidung morgen.
+
+**Nächster Schritt morgen**: WhatsAppCloudSender-Mini-Phase
+starten (Plan oben). Als erstes `.claude/rules/phase-10.md`
+schreiben (gleiches Format wie phase-6/7/8), User-Freigabe
+einholen, dann implementieren.
 
 ## Wie ich in der nächsten Session weitermache
 
