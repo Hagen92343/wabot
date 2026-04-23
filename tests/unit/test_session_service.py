@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -449,3 +450,298 @@ def test_send_prompt_missing_project_raises(
     with pytest.raises(ProjectNotFoundError):
         svc.send_prompt("ghost", "hi")
     assert tmux.send_text_calls == []
+
+
+# ---- transcript watching (C4.2d-3) -------------------------------------
+
+
+class _FakeTranscriptWatcher:
+    """Records every watch / unwatch call; never actually tails files.
+
+    Matches the ``TranscriptWatcher`` protocol (watch / unwatch /
+    read_since). ``watch`` returns an incrementally-numbered handle
+    so tests can assert distinct handles.
+    """
+
+    def __init__(self) -> None:
+        from whatsbot.ports.transcript_watcher import WatchHandle
+
+        self.watch_calls: list[Path] = []
+        self.unwatch_calls: list[str] = []
+        self.last_callback: Any = None
+        self._counter = 0
+        self._handle_cls = WatchHandle
+
+    def watch(
+        self,
+        path: Path,
+        callback: Any,
+        *,
+        from_offset: int = 0,
+    ) -> Any:
+        del from_offset
+        self._counter += 1
+        handle_id = f"h{self._counter}"
+        self.watch_calls.append(path)
+        self.last_callback = callback
+        return self._handle_cls(id=handle_id, path=path)
+
+    def unwatch(self, handle: Any) -> None:
+        self.unwatch_calls.append(handle.id)
+
+    def read_since(
+        self, path: Path, offset: int
+    ) -> tuple[list[str], int]:
+        del path
+        return ([], offset)
+
+
+class _FakeTranscriptIngest:
+    """Records feed calls; never parses anything."""
+
+    def __init__(self) -> None:
+        self.feeds: list[tuple[str, str]] = []
+
+    def feed(self, project: str, line: str) -> None:
+        self.feeds.append((project, line))
+
+    def reset(self, project: str) -> None:  # pragma: no cover - unused here
+        del project
+
+
+def _build_service_with_watcher(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    tmux: FakeTmuxController,
+    watcher: _FakeTranscriptWatcher,
+    ingest: _FakeTranscriptIngest,
+    claude_home: Path,
+    *,
+    discovery_timeout_seconds: float = 0.2,
+    discovery_poll_seconds: float = 0.01,
+) -> SessionService:
+    return SessionService(
+        project_repo=SqliteProjectRepository(conn),
+        session_repo=SqliteClaudeSessionRepository(conn),
+        tmux=tmux,
+        projects_root=projects_root,
+        safe_claude_binary="safe-claude",
+        transcript_watcher=watcher,
+        transcript_ingest=ingest,  # type: ignore[arg-type]
+        claude_home=claude_home,
+        discovery_timeout_seconds=discovery_timeout_seconds,
+        discovery_poll_seconds=discovery_poll_seconds,
+    )
+
+
+@pytest.fixture
+def claude_home(tmp_path: Path) -> Path:
+    root = tmp_path / "claude-home"
+    root.mkdir()
+    return root
+
+
+def _encoded_projects_dir(
+    claude_home: Path, project_cwd: Path
+) -> Path:
+    """Mirror of domain.claude_paths.claude_projects_dir, duplicated
+    here so tests don't silently regress if the helper changes shape.
+    """
+    encoded = str(project_cwd).replace("/", "-")
+    return claude_home / "projects" / encoded
+
+
+def test_resume_path_watches_expected_transcript_directly(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    claude_home: Path,
+) -> None:
+    _seed_project(conn, "alpha", projects_root=projects_root)
+    # Preseed DB with a resume session_id so the resume branch fires.
+    SqliteClaudeSessionRepository(conn).upsert(
+        ClaudeSession(
+            project_name="alpha",
+            session_id="sess-abc",
+            transcript_path="",
+            started_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            current_mode=Mode.NORMAL,
+        )
+    )
+    tmux = FakeTmuxController()
+    watcher = _FakeTranscriptWatcher()
+    ingest = _FakeTranscriptIngest()
+    svc = _build_service_with_watcher(
+        conn, projects_root, tmux, watcher, ingest, claude_home
+    )
+
+    svc.ensure_started("alpha")
+
+    project_cwd = projects_root / "alpha"
+    expected = _encoded_projects_dir(claude_home, project_cwd) / "sess-abc.jsonl"
+    assert watcher.watch_calls == [expected]
+
+
+def test_fresh_start_polls_and_watches_discovered_transcript(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    claude_home: Path,
+) -> None:
+    _seed_project(conn, "alpha", projects_root=projects_root)
+    # Pre-create the transcript file the stub "safe-claude" would write
+    # so the polling loop finds it on the first tick.
+    project_cwd = projects_root / "alpha"
+    pdir = _encoded_projects_dir(claude_home, project_cwd)
+    pdir.mkdir(parents=True, exist_ok=True)
+    transcript = pdir / "fresh-uuid.jsonl"
+    transcript.write_text("{}\n")
+
+    tmux = FakeTmuxController()
+    watcher = _FakeTranscriptWatcher()
+    ingest = _FakeTranscriptIngest()
+    svc = _build_service_with_watcher(
+        conn, projects_root, tmux, watcher, ingest, claude_home
+    )
+
+    svc.ensure_started("alpha")
+
+    assert watcher.watch_calls == [transcript]
+    # DB row now carries the discovered session_id + transcript path.
+    row = SqliteClaudeSessionRepository(conn).get("alpha")
+    assert row is not None
+    assert row.session_id == "fresh-uuid"
+    assert row.transcript_path == str(transcript)
+
+
+def test_fresh_start_no_transcript_appears_times_out_without_error(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    claude_home: Path,
+) -> None:
+    _seed_project(conn, "alpha", projects_root=projects_root)
+    tmux = FakeTmuxController()
+    watcher = _FakeTranscriptWatcher()
+    ingest = _FakeTranscriptIngest()
+    svc = _build_service_with_watcher(
+        conn,
+        projects_root,
+        tmux,
+        watcher,
+        ingest,
+        claude_home,
+        discovery_timeout_seconds=0.05,
+    )
+
+    # No transcript seeded — discovery times out. ensure_started must
+    # still complete normally.
+    svc.ensure_started("alpha")
+    assert watcher.watch_calls == []
+    row = SqliteClaudeSessionRepository(conn).get("alpha")
+    assert row is not None
+    assert row.session_id == ""  # unchanged
+
+
+def test_idempotent_second_ensure_started_does_not_double_watch(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    claude_home: Path,
+) -> None:
+    _seed_project(conn, "alpha", projects_root=projects_root)
+    SqliteClaudeSessionRepository(conn).upsert(
+        ClaudeSession(
+            project_name="alpha",
+            session_id="sess-42",
+            transcript_path="",
+            started_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            current_mode=Mode.NORMAL,
+        )
+    )
+    tmux = FakeTmuxController()
+    watcher = _FakeTranscriptWatcher()
+    ingest = _FakeTranscriptIngest()
+    svc = _build_service_with_watcher(
+        conn, projects_root, tmux, watcher, ingest, claude_home
+    )
+
+    svc.ensure_started("alpha")
+    svc.ensure_started("alpha")
+    svc.ensure_started("alpha")
+    # Only one watch attached despite three ensure_started calls.
+    assert len(watcher.watch_calls) == 1
+
+
+def test_watcher_callback_routes_lines_to_correct_project(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    claude_home: Path,
+) -> None:
+    _seed_project(conn, "alpha", projects_root=projects_root)
+    SqliteClaudeSessionRepository(conn).upsert(
+        ClaudeSession(
+            project_name="alpha",
+            session_id="sess-alpha",
+            transcript_path="",
+            started_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            current_mode=Mode.NORMAL,
+        )
+    )
+    tmux = FakeTmuxController()
+    watcher = _FakeTranscriptWatcher()
+    ingest = _FakeTranscriptIngest()
+    svc = _build_service_with_watcher(
+        conn, projects_root, tmux, watcher, ingest, claude_home
+    )
+
+    svc.ensure_started("alpha")
+
+    # Simulate the watcher firing.
+    watcher.last_callback('{"type":"assistant","message":{"content":[]}}')
+    assert ingest.feeds == [
+        ("alpha", '{"type":"assistant","message":{"content":[]}}')
+    ]
+
+
+def test_stop_transcript_watch_unwatches_and_is_idempotent(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+    claude_home: Path,
+) -> None:
+    _seed_project(conn, "alpha", projects_root=projects_root)
+    SqliteClaudeSessionRepository(conn).upsert(
+        ClaudeSession(
+            project_name="alpha",
+            session_id="sess-42",
+            transcript_path="",
+            started_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            current_mode=Mode.NORMAL,
+        )
+    )
+    tmux = FakeTmuxController()
+    watcher = _FakeTranscriptWatcher()
+    ingest = _FakeTranscriptIngest()
+    svc = _build_service_with_watcher(
+        conn, projects_root, tmux, watcher, ingest, claude_home
+    )
+
+    svc.ensure_started("alpha")
+    svc.stop_transcript_watch("alpha")
+    # Exactly one unwatch call.
+    assert len(watcher.unwatch_calls) == 1
+    # Second call is a no-op.
+    svc.stop_transcript_watch("alpha")
+    assert len(watcher.unwatch_calls) == 1
+    # After stop, a fresh ensure_started re-attaches.
+    svc.ensure_started("alpha")
+    assert len(watcher.watch_calls) == 2
+
+
+def test_service_without_watcher_or_ingest_skips_watching(
+    conn: sqlite3.Connection,
+    projects_root: Path,
+) -> None:
+    _seed_project(conn, "alpha", projects_root=projects_root)
+    tmux = FakeTmuxController()
+    # No watcher/ingest injected — legacy behaviour.
+    svc = _build_service(conn, projects_root, tmux)
+    svc.ensure_started("alpha")  # must not raise
+    # Nothing crashes when we try to stop a non-existent watch.
+    svc.stop_transcript_watch("alpha")
