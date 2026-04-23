@@ -1,12 +1,44 @@
 # Aktueller Stand
 
 **Projekt-Status**: **Phase 1-9 komplett ✅** — Build-Phase zu Ende.
-**Letzter abgeschlossener Checkpoint**: **C9.3** — Edge-Case-Härtung
-+ E731-Fix. C9.1 (Smoke-Test) + C9.2 (Doc-Suite) + C9.3 alle
-gleichzeitig in einem Commit.
-**Nächster Schritt**: Live-Deployment nach `docs/INSTALL.md`, erster
-echter WhatsApp-Ping vom Handy. Hotfix-Phase 10 nur bei
-Live-Problemen.
+**Live-Deployment läuft** nach `docs/INSTALL.md`.
+
+## Deployment-Stand (Stand 2026-04-23)
+
+Abgeschlossen:
+- ✅ **Schritt 1** — Brew-Pakete installiert (python@3.12, tmux,
+  ffmpeg, cloudflared, whisper-cpp).
+- ✅ **Schritt 2** — Whisper-Modell `ggml-small.bin` unter
+  `~/Library/whisper-cpp/models/`.
+- ✅ **Schritt 3** — Claude Code installiert, `claude /login` mit
+  **Subscription**, nicht API.
+- ✅ **Schritt 4** — Repo unter `~/whatsbot`, `make install` durch.
+- ✅ **Schritt 5** — Meta-App angelegt, WhatsApp-Produkt, System-
+  User-Access-Token generiert, 4 Werte notiert (App Secret,
+  Verify Token, Access Token, Phone Number ID).
+- ✅ **Schritt 6** — `make setup-secrets` durch, alle 7 Keychain-
+  Einträge gesetzt (inkl. panic-pin + hook-shared-secret).
+
+Offen, **morgen hier weitermachen**:
+- ⏭ **Schritt 7** — Cloudflare Tunnel. `cloudflared tunnel login`,
+  `tunnel create whatsbot`, dann entweder
+  `cloudflared tunnel --url http://127.0.0.1:8000 run whatsbot`
+  (quick-path via trycloudflare.com) oder Config-Datei + eigene
+  Domain (siehe `docs/INSTALL.md §7`).
+- ⏭ **Schritt 8** — `make deploy-launchd DOMAIN=local`, dann
+  `launchctl list | grep whatsbot` → drei Einträge erwartet.
+  `tail -f ~/Library/Logs/whatsbot/app.jsonl` bis
+  `startup_complete`.
+- ⏭ **Schritt 9** — Meta-Webhook-URL eintragen in der Meta-
+  Developer-Konsole: Callback-URL + Verify-Token, `messages`
+  abonnieren.
+- ⏭ **Schritt 10** — SIM-Port-Lock beim Carrier aktivieren
+  (Spec §24, gegen SIM-Swap).
+- ⏭ **Schritt 11** — Erster `/ping` vom Handy. Erwartete Antwort:
+  `pong · 0.1.0 · uptime 0d 0h 0m · env prod`.
+
+**Nächster Schritt morgen**: `docs/INSTALL.md §7` öffnen und mit
+dem Cloudflare-Tunnel anfangen.
 
 ## Wie ich in der nächsten Session weitermache
 
