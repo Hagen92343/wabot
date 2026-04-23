@@ -86,7 +86,7 @@ def test_select_for_eviction_exact_cap_no_op() -> None:
 
 
 def test_select_for_eviction_oldest_first() -> None:
-    # 4 items × 100 bytes each = 400 total. Cap at 250 → evict the
+    # 4 items * 100 bytes each = 400 total. Cap at 250 -> evict the
     # two oldest to get under.
     items = [
         _item("oldest", size=100, mtime=1.0),
@@ -109,7 +109,7 @@ def test_select_for_eviction_single_large_item_exceeds_cap() -> None:
 
 
 def test_select_for_eviction_stops_when_under_cap() -> None:
-    # 3 items × 1000 bytes = 3000. Cap 1500. Should evict just one
+    # 3 items * 1000 bytes = 3000. Cap 1500. Should evict just one
     # (oldest), stop because we're then at 2000... still over. Evict
     # second. Now at 1000, stop.
     items = [

@@ -16,10 +16,9 @@ from whatsbot.application.media_service import MediaService
 from whatsbot.ports.media_cache import CachedItem
 from whatsbot.ports.media_downloader import (
     DownloadedMedia,
-    MediaDownloadError,
     MediaDownloader,
+    MediaDownloadError,
 )
-
 
 # Reuse the same fakes shape as the image tests so the coverage
 # profile across the two kinds stays comparable. We keep this file

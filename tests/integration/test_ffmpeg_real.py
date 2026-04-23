@@ -47,7 +47,7 @@ def _make_silence_ogg(path: Path, *, seconds: float = 1.0) -> None:
         "libopus",
         str(path),
     ]
-    result = subprocess.run(  # noqa: S603 — argv list, no shell
+    result = subprocess.run(
         cmd, capture_output=True, timeout=30.0, check=False
     )
     if result.returncode != 0:

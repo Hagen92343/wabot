@@ -112,10 +112,13 @@ def _service(
 ) -> DeleteService:
     secrets = StubSecretsProvider({KEY_PANIC_PIN: pin}) if pin else StubSecretsProvider({})
     if clock_values is None:
-        clock_callable = lambda: 1_000
+        def clock_callable() -> int:
+            return 1_000
     else:
         it = iter(clock_values)
-        clock_callable = lambda: next(it)
+
+        def clock_callable() -> int:
+            return next(it)
     return DeleteService(
         pending_repo=pending_repo,
         project_repo=project_repo,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from whatsbot.domain.hook_decisions import (
@@ -62,7 +64,9 @@ def test_ask_user_is_not_terminal() -> None:
 
 def test_hookdecision_is_frozen() -> None:
     d = allow()
-    with pytest.raises(Exception):  # FrozenInstanceError is a subclass
+    # FrozenInstanceError is a subclass of AttributeError, either is
+    # acceptable — the point is that assignment fails.
+    with pytest.raises((AttributeError, dataclasses.FrozenInstanceError)):
         d.reason = "tampered"  # type: ignore[misc]
 
 

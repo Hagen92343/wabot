@@ -140,7 +140,7 @@ def parse_reset_at(raw: object) -> int | None:
         return None
     if isinstance(raw, bool):  # bool is a subclass of int — reject explicitly
         return None
-    if isinstance(raw, (int, float)):
+    if isinstance(raw, int | float):
         return int(raw)
     if not isinstance(raw, str):
         return None

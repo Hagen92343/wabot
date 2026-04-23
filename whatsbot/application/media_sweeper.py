@@ -158,7 +158,7 @@ class MediaSweeper:
             bytes_freed=bytes_freed,
         )
 
-    async def _delete(self, path: "object") -> bool:
+    async def _delete(self, path: object) -> bool:
         try:
             # MediaCache.secure_delete takes a Path — mypy already knows.
             await asyncio.to_thread(self._cache.secure_delete, path)  # type: ignore[arg-type]

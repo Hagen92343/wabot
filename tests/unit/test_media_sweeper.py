@@ -15,7 +15,6 @@ from whatsbot.application.media_sweeper import (
 from whatsbot.domain.media_cache import CACHE_TTL_SECONDS
 from whatsbot.ports.media_cache import CachedItem
 
-
 pytestmark = pytest.mark.asyncio
 
 
@@ -82,7 +81,7 @@ async def test_sweep_removes_ttl_expired_items() -> None:
 
 async def test_sweep_evicts_over_cap_oldest_first() -> None:
     now = 1_000_000.0
-    # All fresh — TTL shouldn't fire. 3 × 500 bytes over a 1000 cap.
+    # All fresh — TTL shouldn't fire. 3 * 500 bytes over a 1000 cap.
     items = [
         _item("a", size=500, mtime=now - 3),
         _item("b", size=500, mtime=now - 2),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 
@@ -14,7 +15,6 @@ from whatsbot.adapters.sqlite_pending_delete_repository import (
 from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
 from whatsbot.domain.pending_deletes import PendingDelete
 from whatsbot.domain.projects import Mode, Project, SourceMode
-from datetime import UTC, datetime
 
 pytestmark = pytest.mark.unit
 

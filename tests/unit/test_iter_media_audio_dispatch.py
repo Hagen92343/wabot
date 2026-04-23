@@ -134,7 +134,7 @@ class StubMediaService:
         )
         return MediaOutcome(
             kind="sent",
-            reply=f"📨 Voice an 'alpha' gesendet.",
+            reply="📨 Voice an 'alpha' gesendet.",
             project="alpha",
         )
 

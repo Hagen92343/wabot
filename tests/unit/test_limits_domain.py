@@ -15,7 +15,6 @@ from whatsbot.domain.limits import (
     should_warn,
 )
 
-
 # --- is_active / shortest_active -----------------------------------------
 
 

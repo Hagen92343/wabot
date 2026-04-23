@@ -210,9 +210,8 @@ class LimitService:
         now = self._clock()
         reaped = 0
         for limit in self._repo.list_all():
-            if not is_active(limit, now=now):
-                if self._repo.delete(limit.kind):
-                    reaped += 1
+            if not is_active(limit, now=now) and self._repo.delete(limit.kind):
+                reaped += 1
         if reaped:
             self._log.info("limit_expired_reaped", count=reaped)
         return reaped

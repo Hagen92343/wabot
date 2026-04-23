@@ -9,7 +9,6 @@ from whatsbot.domain.transcription import (
     clean_transcript,
 )
 
-
 # --- basic behaviour ------------------------------------------------------
 
 

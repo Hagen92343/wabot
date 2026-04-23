@@ -16,8 +16,8 @@ from whatsbot.ports.audio_converter import AudioConversionError
 from whatsbot.ports.media_cache import CachedItem
 from whatsbot.ports.media_downloader import (
     DownloadedMedia,
-    MediaDownloadError,
     MediaDownloader,
+    MediaDownloadError,
 )
 
 
