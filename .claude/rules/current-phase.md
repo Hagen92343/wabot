@@ -1,8 +1,8 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 4 — Mode-System + Claude-Launch (in progress)
-**Aktiver Checkpoint**: **C4.2** — Prompt-Roundtrip (Transcript-Watcher + on_turn_complete)
-**Letzter abgeschlossener Checkpoint**: C4.1d (SessionService.ensure_started + `/p`-Wiring)
+**Aktive Phase**: Phase 4 — Mode-System + Claude-Launch — **KOMPLETT** ✅
+**Nächste Phase**: Phase 5 — Input-Lock + Multi-Session (wartet auf User-Freigabe)
+**Letzter abgeschlossener Checkpoint**: C4.9 (Path-Rules für Write/Edit)
 
 ## Phase 4 — laufender Stand (zum Wiederaufnehmen)
 
