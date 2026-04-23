@@ -28,6 +28,10 @@ from whatsbot.application.delete_service import (
     PanicPinNotConfiguredError,
     PendingDeleteExpiredError,
 )
+from whatsbot.application.lock_service import (
+    LocalTerminalHoldsLockError,
+    LockService,
+)
 from whatsbot.application.mode_service import (
     InvalidModeTransitionError,
     ModeService,
@@ -68,6 +72,8 @@ _DENY_PREFIX: Final = "/deny "
 _RM_PREFIX: Final = "/rm "
 _MODE_COMMAND: Final = "/mode"
 _MODE_PREFIX: Final = "/mode "
+_RELEASE_COMMAND: Final = "/release"
+_RELEASE_PREFIX: Final = "/release "
 
 
 class CommandHandler:
@@ -89,6 +95,7 @@ class CommandHandler:
         db_ok_callback: Callable[[], bool] | None = None,
         session_service: SessionService | None = None,
         mode_service: ModeService | None = None,
+        lock_service: LockService | None = None,
     ) -> None:
         self._projects = project_service
         self._allow = allow_service
@@ -100,6 +107,7 @@ class CommandHandler:
         self._db_ok_callback = db_ok_callback
         self._sessions = session_service
         self._modes = mode_service
+        self._locks = lock_service
         self._log = get_logger("whatsbot.commands")
 
     # ---- entrypoint -------------------------------------------------------
@@ -136,6 +144,14 @@ class CommandHandler:
             return self._handle_show_mode()
         if cmd.startswith(_MODE_PREFIX):
             return self._handle_set_mode(cmd[len(_MODE_PREFIX) :].strip())
+
+        # /release + /release <name> (Phase 5)
+        if cmd == _RELEASE_COMMAND:
+            return self._handle_release(None)
+        if cmd.startswith(_RELEASE_PREFIX):
+            return self._handle_release(
+                cmd[len(_RELEASE_PREFIX) :].strip()
+            )
 
         # Non-slash text → prompt to the active project (Phase-4
         # C4.2c). Empty text falls through to the default help
@@ -328,6 +344,17 @@ class CommandHandler:
         except ProjectNotFoundError as exc:
             return CommandResult(
                 reply=f"⚠️ {exc} Tippe /ls fuer Liste.", command=command
+            )
+        except LocalTerminalHoldsLockError:
+            # Spec §7 soft-preemption: local terminal holds the lock.
+            # Tell the user how to override.
+            return CommandResult(
+                reply=(
+                    f"🔒 Terminal aktiv auf '{name}'. "
+                    f"Benutze /force {name} <prompt> zum Uebernehmen "
+                    "oder /release zum Freigeben."
+                ),
+                command=command,
             )
         except (TmuxError, FileNotFoundError, OSError) as exc:
             self._log.error(
@@ -603,6 +630,46 @@ class CommandHandler:
                 f"({active})"
             )
         return CommandResult(reply=reply, command="/mode")
+
+    # ---- /release [name] (Phase 5) ---------------------------------------
+
+    def _handle_release(self, raw_name: str | None) -> CommandResult:
+        """Drop the session lock back to ``free`` for the named (or
+        active) project. Idempotent — nothing-to-release still gets
+        a friendly confirmation."""
+        if self._locks is None:
+            return CommandResult(
+                reply="⚠️ Lock-Service nicht konfiguriert.",
+                command="/release",
+            )
+
+        if raw_name:
+            try:
+                name = validate_project_name(raw_name)
+            except InvalidProjectNameError as exc:
+                return CommandResult(reply=f"⚠️ {exc}", command="/release")
+        else:
+            active = self._active.get_active()
+            if active is None:
+                return CommandResult(
+                    reply=(
+                        "kein aktives Projekt — setze eines mit /p <name> "
+                        "oder gib /release <name> an."
+                    ),
+                    command="/release",
+                )
+            name = active
+
+        existed = self._locks.release(name)
+        if existed:
+            return CommandResult(
+                reply=f"🔓 Lock fuer '{name}' freigegeben.",
+                command="/release",
+            )
+        return CommandResult(
+            reply=f"'{name}' hatte keinen aktiven Lock.",
+            command="/release",
+        )
 
     # ---- helpers ----------------------------------------------------------
 

@@ -43,6 +43,9 @@ from whatsbot.adapters.sqlite_pending_output_repository import (
 )
 from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
 from whatsbot.adapters.sqlite_repo import open_state_db
+from whatsbot.adapters.sqlite_session_lock_repository import (
+    SqliteSessionLockRepository,
+)
 from whatsbot.adapters.subprocess_git_clone import SubprocessGitClone
 from whatsbot.adapters.tmux_subprocess import SubprocessTmuxController
 from whatsbot.adapters.watchdog_transcript_watcher import (
@@ -55,6 +58,7 @@ from whatsbot.application.command_handler import CommandHandler
 from whatsbot.application.confirmation_coordinator import ConfirmationCoordinator
 from whatsbot.application.delete_service import DeleteService
 from whatsbot.application.hook_service import HookService
+from whatsbot.application.lock_service import LockService
 from whatsbot.application.mode_service import ModeService
 from whatsbot.application.output_service import OutputService
 from whatsbot.application.project_service import ProjectService
@@ -211,7 +215,15 @@ def create_app(
     # silently drop turn-end callbacks: better than raising on the
     # watcher thread and killing the observer.
     session_service: SessionService | None = None
+    lock_service: LockService | None = None
     if tmux is not None:
+        # Phase 5 LockService — one instance shared by SessionService
+        # (acquire before send_prompt), TranscriptIngest (note local
+        # input when a non-ZWSP user turn arrives), CommandHandler
+        # (/release) and the startup sweeper.
+        lock_service = LockService(
+            repo=SqliteSessionLockRepository(conn),
+        )
         watcher = transcript_watcher
         ingest: TranscriptIngest | None = None
         if watcher is None and settings.env is not Environment.TEST:
@@ -244,10 +256,17 @@ def create_app(
                     return
                 svc.fire_auto_compact(project)
 
+            locks_ref = lock_service  # close over the outer instance
+
+            def _note_local_input(project: str) -> None:
+                if locks_ref is not None:
+                    locks_ref.note_local_input(project)
+
             ingest = TranscriptIngest(
                 session_repo=session_repo_for_ingest,
                 on_turn_end=_deliver_turn_end,
                 on_auto_compact=_fire_compact,
+                on_local_input=_note_local_input,
             )
 
         session_kwargs: dict[str, object] = {
@@ -266,6 +285,8 @@ def create_app(
             session_kwargs["claude_home"] = claude_home
         if discovery_timeout_seconds is not None:
             session_kwargs["discovery_timeout_seconds"] = discovery_timeout_seconds
+        if lock_service is not None:
+            session_kwargs["lock_service"] = lock_service
         session_service = SessionService(**session_kwargs)  # type: ignore[arg-type]
         # Resolve the forward ref used by the ingest's auto-compact
         # callback (constructed above before session_service existed).
@@ -293,6 +314,7 @@ def create_app(
         env=settings.env.value,
         session_service=session_service,
         mode_service=mode_service,
+        lock_service=lock_service,
     )
 
     app = FastAPI(

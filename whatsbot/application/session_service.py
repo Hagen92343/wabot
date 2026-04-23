@@ -30,6 +30,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from whatsbot.application.lock_service import LockService
 from whatsbot.application.transcript_ingest import TranscriptIngest
 from whatsbot.domain.claude_paths import (
     DEFAULT_CLAUDE_HOME,
@@ -80,6 +81,7 @@ class SessionService:
         claude_home: Path = DEFAULT_CLAUDE_HOME,
         discovery_timeout_seconds: float = DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
         discovery_poll_seconds: float = DEFAULT_DISCOVERY_POLL_SECONDS,
+        lock_service: LockService | None = None,
     ) -> None:
         self._projects = project_repo
         self._sessions = session_repo
@@ -91,6 +93,7 @@ class SessionService:
         self._claude_home = claude_home
         self._discovery_timeout_s = discovery_timeout_seconds
         self._discovery_poll_s = discovery_poll_seconds
+        self._locks = lock_service
         # Tracks active transcript watches per project so ensure_started
         # is idempotent and we have a handle to pass to unwatch on
         # mode-recycle / shutdown.
@@ -252,8 +255,17 @@ class SessionService:
         from this method. ``send_prompt`` returns once the prompt
         has been handed to tmux; the user sees an acknowledgement
         handled by the command layer.
+
+        Raises ``LocalTerminalHoldsLockError`` (from lock_service
+        when wired, Spec §7) if the local terminal actively holds
+        the session.
         """
         session = self.ensure_started(project_name)
+
+        if self._locks is not None:
+            # Any LocalTerminalHoldsLockError propagates up — the
+            # command layer catches it and renders the 🔒 reply.
+            self._locks.acquire_for_bot(project_name)
 
         result = sanitize(text, mode=session.current_mode)
         if result.suspected:

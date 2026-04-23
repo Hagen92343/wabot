@@ -56,6 +56,12 @@ UsageLimitCallback = Callable[[str, UsageLimitEvent], None]
 # implementation sends ``/compact`` into the tmux pane.
 AutoCompactCallback = Callable[[str], None]
 
+# Callback fired when a *human* user turn lands in the transcript
+# (non-ZWSP, non-empty, non-sidechain). Spec §7 soft-preemption
+# rule: this is the signal that the local terminal is in play —
+# Phase 5 wires it to ``LockService.note_local_input``.
+LocalInputCallback = Callable[[str], None]
+
 
 @dataclass
 class _IngestState:
@@ -93,11 +99,13 @@ class TranscriptIngest:
         on_turn_end: TurnEndCallback,
         on_usage_limit: UsageLimitCallback | None = None,
         on_auto_compact: AutoCompactCallback | None = None,
+        on_local_input: LocalInputCallback | None = None,
     ) -> None:
         self._sessions = session_repo
         self._on_turn_end = on_turn_end
         self._on_usage_limit = on_usage_limit
         self._on_auto_compact = on_auto_compact
+        self._on_local_input = on_local_input
         self._states: dict[str, _IngestState] = {}
         self._lock = threading.Lock()
         self._log = get_logger("whatsbot.ingest")
@@ -156,6 +164,16 @@ class TranscriptIngest:
             state = self._states.get(project_name)
             if state is not None:
                 state.assistant_text_parts = []
+        # Spec §7 soft-preemption signal: tell the lock service
+        # the local terminal is in play. Fires outside the lock so
+        # a slow callback doesn't block further feeds.
+        if self._on_local_input is not None:
+            try:
+                self._on_local_input(project_name)
+            except Exception:  # pragma: no cover - logged
+                self._log.exception(
+                    "local_input_callback_failed", project=project_name
+                )
 
     def _handle_assistant(
         self, project_name: str, event: AssistantEvent
