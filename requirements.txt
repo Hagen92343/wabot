@@ -11,3 +11,8 @@ python-ulid==3.0.*
 keyring==25.*
 tenacity==9.*
 python-multipart==0.0.*
+
+# Phase 4 (C4.2b): transcript-file watcher for Claude JSONL tailing.
+# Uses FSEvents on macOS; falls back to polling for filesystems
+# that can't deliver native change notifications.
+watchdog==6.0.*
