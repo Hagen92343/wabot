@@ -45,7 +45,9 @@ from whatsbot.ports.secrets_provider import (
     SecretsProvider,
 )
 
-_DEFAULT_CLOCK: Callable[[], int] = lambda: int(time.time())
+
+def _DEFAULT_CLOCK() -> int:
+    return int(time.time())
 
 
 class NoPendingDeleteError(RuntimeError):

@@ -1,29 +1,59 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 8 **abgeschlossen** ✅ — wartet auf Freigabe
-für **Phase 9 — Docs + Smoke-Tests + Polish**
-**Letzter abgeschlossener Checkpoint**: **C8.4** — Prometheus /metrics
-(MetricsRegistry + ResponseLatencyMiddleware + 3 Instrumentierungspunkte)
-**User-Freigabe für Phase 8**: ✅ erteilt
+**Projekt-Status**: **Phase 1-9 komplett ✅** — Build-Phase zu Ende.
+**Letzter abgeschlossener Checkpoint**: **C9.3** — Edge-Case-Härtung
++ E731-Fix. C9.1 (Smoke-Test) + C9.2 (Doc-Suite) + C9.3 alle
+gleichzeitig in einem Commit.
+**Nächster Schritt**: Live-Deployment nach `docs/INSTALL.md`, erster
+echter WhatsApp-Ping vom Handy. Hotfix-Phase 10 nur bei
+Live-Problemen.
 
 ## Wie ich in der nächsten Session weitermache
 
 1. Diese Datei lesen.
-2. Spec §21 Phase 9 + `.claude/rules/phases-3-to-9.md` Phase-9-Stub
-   lesen — Docs-Vervollständigung + tests/smoke.py + Polish.
-3. `git log --oneline -8` für den Commit-Stand bis C8.4-Close
-   (Phase-8-Abschluss).
-4. `venv/bin/pytest tests/unit/ tests/integration/
+2. `git log --oneline -12` für den Commit-Stand bis Phase-9-Close.
+3. `venv/bin/pytest tests/unit/ tests/integration/ tests/smoke.py
    --ignore=tests/unit/test_hook_common.py
    --ignore=tests/integration/test_hook_script.py
    --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte **1501/1501 grün** (+ 1 skipped wenn ffmpeg fehlt)
-   zeigen. mypy --strict clean auf 119 source files. ruff
-   clean (bis auf pre-existing E731 in `delete_service.py`).
-5. **Vor Beginn Phase 9**: `.claude/rules/phase-9.md` schreiben
-   (gleiche Struktur wie phase-8.md), basierend auf Spec §21
-   Phase 9 + den Gotchas aus `phases-3-to-9.md`. User reviewen
-   lassen, *dann* erst implementieren.
+   sollte **1542/1542 grün** (+ 1 skipped wenn ffmpeg fehlt)
+   zeigen. mypy --strict clean auf 120 source files. ruff clean.
+4. `make smoke` separat laufen lassen — muss in unter 2 s grün
+   durchlaufen.
+5. **Live-Deployment** per `docs/INSTALL.md` — wenn der Build den
+   ersten echten WhatsApp-Ping vom Handy beantwortet, ist das
+   Projekt produktiv.
+
+## Phase 9 liefert (Live-Verhalten)
+
+- `tests/smoke.py` — End-to-End-Journey via signed /webhook ohne
+  Claude-Subprozess. 9 Schritte + 2 Guard-Tests. `make smoke`
+  grün.
+- Komplette Doc-Suite unter `docs/`: INSTALL (12-Schritt-Setup),
+  RUNBOOK (9 Playbooks + Rotation + Updates + Rollback),
+  SECURITY (Layer-Tabelle + 17 Denies + Threat-Model + akzeptierte
+  Schwächen), MODES (3 Modi + FAQ), TROUBLESHOOTING (Diagnose vom
+  Handy + Mac, häufige Symptome), CHEAT-SHEET (ein-Seiter aller
+  Commands). Plus README.md mit Link-Matrix.
+- `domain/text_sanitize.py` strippt Kontroll-Zeichen vor dem
+  Command-Router — NULL, ESC, BEL, BS, DEL + C0 außer tab/LF/CR.
+  Unicode + Emoji bleiben.
+- E731-Erbe aus Phase 2 (`_DEFAULT_CLOCK = lambda …` in
+  `delete_service.py`) auf `def` umgestellt. ruff clean auf allen
+  angefassten Files.
+- 35 neue Tests (21 text_sanitize unit + 14 edge_cases + 3 smoke
+  + 2 docs-smoke-guards — Zählung inkl. Neu-Baseline).
+
+## Phase 9 Architektur-Notes
+
+- Smoke-Test ist bewusst **nicht** auf Claude-Subprocess-Ebene —
+  Phase 4 C4.2-C4.7 decken das schon ab. `tests/smoke.py`
+  arbeitet auf Command-Router-Level mit `RecordingSender`.
+- Doc-Suite ist für Third-Party-Lesbarkeit geschrieben:
+  INSTALL.md liest sich linear, RUNBOOK.md ist Symptom-first,
+  SECURITY.md zitiert Spec-Abschnitte statt redundant zu sein.
+- `text_sanitize` hat einen Fast-Path (`_needs_sanitize`), der
+  saubere Strings ohne Allocation durchlässt. Hot-Path-fit.
 
 ## C8.4 liefert (Live-Verhalten)
 

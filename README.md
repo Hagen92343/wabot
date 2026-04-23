@@ -1,84 +1,56 @@
-# whatsbot Build-Kit
+# whatsbot
 
-Dieses Kit enthält alles, was du brauchst, um den whatsbot mit Claude Code zu implementieren.
+Ein persönlicher WhatsApp-Bot, der Claude Code auf deinem Mac fernsteuert. Single-User, kein Enterprise-Scope, kein Cloud-Hosting.
 
-## Inhalt
+**Status**: Phase 1-9 ✅ — produktiv auf macOS 14+ (Apple Silicon).
 
-```
-whatsbot-build-kit/
-├── README.md                          ← du bist hier
-├── BOOTSTRAP-PROMPT.md                ← der Prompt für die erste Claude-Code-Session
-├── CLAUDE.md                          ← persistente Meta-Instruktion (lädt Claude Code bei jeder Session)
-├── SPEC.md                            ← die vollständige Spec (1788 Zeilen, §1-28)
-└── .claude/
-    └── rules/
-        ├── current-phase.md           ← Live-Tracker: welche Phase/welcher Checkpoint
-        ├── phase-1.md                 ← detaillierte Rules für Phase 1
-        ├── phase-2.md                 ← detaillierte Rules für Phase 2
-        └── phases-3-to-9.md           ← Referenz für restliche Phasen
-```
+## Was ist das
 
-## So benutzt du das Kit
+Du schickst eine WhatsApp-Nachricht von unterwegs → der Bot auf deinem Mac nimmt sie entgegen → startet oder routet sie in eine `claude`-Session in tmux → die Antwort kommt als WhatsApp-Message zurück. Am Schreibtisch kannst du dieselben Sessions im Terminal live mitschreiben.
 
-### Schritt 1: Repo anlegen
+Drei Sicherheitsmodi pro Projekt:
+
+- 🟢 **Normal** — Defense-in-Depth, Rückfrage bei Ungewöhnlichem (Default für neue Projekte).
+- 🔵 **Strict** — Nur explizite Allow-Rules, alles andere silent-denied.
+- 🔴 **YOLO** — `--dangerously-skip-permissions`, aber Hook + Deny-Patterns + Write-Protection greifen trotzdem.
+
+Zusätzlich: `/panic` killt alles, Watchdog-LaunchAgent als unabhängiger Dead-Man's-Switch, Output-Redaction gegen Key-Leaks.
+
+## Architektur
+
+- Hexagonal (Domain / Ports / Adapters / Application).
+- Python 3.12, FastAPI, SQLite (WAL), structlog.
+- tmux pro Projekt, Claude-Code via Max-20x-Subscription.
+- Cloudflare Tunnel für den Meta-Webhook auf `127.0.0.1:8000`.
+- Secrets ausschließlich in macOS Keychain.
+- macOS `launchd` für Bot + DB-Backup + Watchdog.
+
+## Start
 
 ```bash
-mkdir -p ~/whatsbot
+git clone <repo> ~/whatsbot
 cd ~/whatsbot
-git init
+# Dann: docs/INSTALL.md folgen.
 ```
 
-### Schritt 2: Build-Kit ins Repo kopieren
+Siehe [docs/INSTALL.md](docs/INSTALL.md) für das komplette Setup (Brew-Pakete, Keychain, Cloudflare, Meta-App, LaunchAgents).
 
-Den gesamten Inhalt dieses `whatsbot-build-kit/`-Ordners ins Repo legen:
+## Dokumentation
 
-```bash
-cp -r /pfad/zum/whatsbot-build-kit/* ~/whatsbot/
-cp -r /pfad/zum/whatsbot-build-kit/.claude ~/whatsbot/
-```
+| Thema | Datei |
+|---|---|
+| Vollständige Installation | [docs/INSTALL.md](docs/INSTALL.md) |
+| Betrieb & Recovery | [docs/RUNBOOK.md](docs/RUNBOOK.md) |
+| Security-Modell | [docs/SECURITY.md](docs/SECURITY.md) |
+| Die drei Modi | [docs/MODES.md](docs/MODES.md) |
+| Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
+| Command-Referenz (eine Seite) | [docs/CHEAT-SHEET.md](docs/CHEAT-SHEET.md) |
+| Vollständige Spec | [SPEC.md](SPEC.md) |
+| Änderungslog | [CHANGELOG.md](CHANGELOG.md) |
 
-Dann:
+## Nicht-Ziele
 
-```bash
-cd ~/whatsbot
-git add -A
-git commit -m "docs: initial spec and build kit"
-```
-
-### Schritt 3: Claude Code starten
-
-```bash
-cd ~/whatsbot
-claude
-```
-
-### Schritt 4: Bootstrap-Prompt geben
-
-Lies `BOOTSTRAP-PROMPT.md` und kopiere den Prompt in deine Claude-Code-Session. Dann folge den Anweisungen dort.
-
-## Was dieses Kit nicht enthält
-
-- Claude Code selbst (separat installieren)
-- WhatsApp-Business-Account (manuell bei Meta anlegen)
-- Cloudflare-Tunnel (während Phase 1 einrichten)
-- macOS Keychain-Secrets (interaktiv in Phase 1 setzen via `make setup-secrets`)
-
-All das ist in SPEC.md §22 (Deploy) dokumentiert.
-
-## Größenordnung
-
-- 9 Phasen, ca. 20-25 Claude-Code-Sessions
-- Finale Codebase: ca. 8-12.000 Zeilen Python, Tests inklusive
-- Timeline: mehrere Wochen bei realistischer Nebenbei-Arbeit
-
-## Wenn etwas unklar ist
-
-Lies §27 (Entscheidungs-Log) in SPEC.md – dort ist jede wichtige Design-Entscheidung mit Begründung dokumentiert. Wenn du dich später fragst "warum haben wir das so gemacht", steht die Antwort dort.
-
-Die drei bewusst akzeptierten Schwächen (§26) sind auch klar benannt. Falls sich deine Risiko-Einschätzung ändert, kannst du sie später schließen.
-
-## Support
-
-Diese Spec und das Kit sind bewusst so geschrieben, dass sie selbsterklärend sind. Alles, was ein Implementierer wissen muss, steht in den Files. Wenn du trotzdem etwas brauchst: die Claude-Code-Docs unter https://code.claude.com/docs/en/overview.
-
-Viel Erfolg.
+- Kein Multi-User, keine Cloud-Variante.
+- Keine API-Abrechnung (vierfacher Subscription-Lock gegen versehentliches Umschwenken).
+- Kein Telegram / anderer Messenger.
+- Kein Auto-Agent-zu-Agent.

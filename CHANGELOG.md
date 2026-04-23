@@ -5,6 +5,76 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
+### Phase 9 — Docs + Smoke-Tests + Polish (complete) ✅
+
+Phase 9 macht aus dem Build ein Produkt. End-to-End-Smoke, eine
+vollständige Doc-Suite, Edge-Case-Härtung, Aufräumen von
+Phase-2-Erbe.
+
+#### C9.1 — End-to-End Smoke-Test
+
+- `tests/smoke.py` — ein signed /webhook-getriebener Journey-Test
+  über 9 Schritte (ping → new → ls → mode → bad-signature silent-
+  drop → rejected-sender silent-drop → status → AWS-Key-Redaction
+  → /metrics populated). Kein Claude-Subprozess; der exercised
+  Pfad ist Meta-Signature → Whitelist → Command-Router →
+  OutputService → Redaction → Counter. Plus zwei Guard-Tests
+  (`/metrics` content-type + `/health` shape).
+- `make smoke` grün in unter 2 s.
+- Alten `tests/smoke_phase2.py` entfernt (Phase-2-Inhalte sind in
+  `tests/smoke.py` aufgegangen).
+
+#### C9.2 — Dokumentations-Suite
+
+- `README.md` — Ein-Seiter, Status-Badge, Link-Matrix auf alle
+  Docs.
+- `docs/INSTALL.md` — 12 Schritte von leerem Mac zum `/ping`.
+  Brew-Pakete, Whisper-Modell, Claude-Code-Installer, Repo +
+  Python, Keychain-Secrets, Meta-App, Cloudflare Tunnel,
+  LaunchAgents, Webhook-URL, SIM-Port-Lock, erster Ping.
+- `docs/RUNBOOK.md` — Alle 9 Recovery-Playbooks aus Spec §23 +
+  Secret-Rotation + Updates + Rollback + Deinstallation.
+- `docs/SECURITY.md` — Defense-Layer-Tabelle pro Modus, 17
+  Deny-Patterns, 4-Stage-Redaction, STRIDE-Threat-Model, die
+  drei bewusst akzeptierten Schwächen mit Worst-Case-Szenarien.
+- `docs/MODES.md` — Normal / Strict / YOLO im Detail, Smart-
+  Detection-Tabelle, FAQ (keine PIN auf /mode yolo, YOLO-Reset
+  bei Reboot, Strict-Escape-Flow).
+- `docs/TROUBLESHOOTING.md` — Diagnose-Commands vom Handy +
+  Mac (Logs, Heartbeat, tmux, DB, Tunnel, Metrics), häufige
+  Symptome mit Fix-Rezepten.
+- `docs/CHEAT-SHEET.md` — eine Seite, alle Commands tabellarisch
+  nach Kategorie, Mode-Badges, Lock-Badges.
+- Kein TODO/TBD/FIXME in den Docs.
+
+#### C9.3 — Edge-Case-Härtung + E731-Fix
+
+- `whatsbot/domain/text_sanitize.py` (pure) — strippt Kontroll-
+  Zeichen (`\x00-\x08`, `\x0b`, `\x0c`, `\x0e-\x1f`, `\x7f`)
+  bevor inbound Text den Command-Router oder tmux erreicht.
+  `\t`, `\n`, `\r` bleiben; Unicode + Emoji bleiben unverändert.
+  Fast-Path: saubere Texte gehen durch `is` identity return
+  (keine Allocation).
+- `meta_webhook.iter_text_messages` ruft `sanitize_inbound_text`
+  über jeden `body` vor dem `TextMessage`-yield.
+- `delete_service._DEFAULT_CLOCK` jetzt `def`-Funktion statt
+  `lambda`-Assignment (E731-Erbe aus Phase 2 behoben).
+- Tests (35 neu):
+  - `tests/unit/test_text_sanitize.py` (21) — idempotency,
+    C0-Whitelist, ESC/BEL/BS/DEL-strip, Unicode-preservation,
+    emoji-only, C1-preservation, clean-input-identity.
+  - `tests/unit/test_edge_cases.py` (14) — exotic project names
+    rejected (whitespace, Unicode, emoji, dot, uppercase, leading
+    underscore, too-short, too-long), well-formed names accepted
+    (5), empty/whitespace bare prompt survives, control-char-
+    prefixed /ping reaches router after strip, ESC byte never
+    leaks outbound, 15 KB bare prompt doesn't crash webhook.
+
+**Tests-Stand**: 1542/1542 grün (C8.4 Baseline 1501 + smoke 3 +
+text_sanitize 21 + edge_cases 14 + Überlappungen).
+mypy `--strict` clean auf 120 source files. ruff clean auf allen
+angefassten Files.
+
 ### Phase 8 — Observability + Limits (complete) ✅
 
 Alle vier Checkpoints grün. Phase 8 ist damit inhaltlich

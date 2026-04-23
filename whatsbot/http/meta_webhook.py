@@ -41,6 +41,7 @@ from whatsbot.config import Environment, Settings
 from whatsbot.domain import whitelist
 from whatsbot.domain.injection import detect_triggers
 from whatsbot.domain.media import SUPPORTED_KINDS, MediaKind, classify_meta_kind
+from whatsbot.domain.text_sanitize import sanitize_inbound_text
 from whatsbot.http.metrics import MetricsRegistry
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.message_sender import MessageSender
@@ -129,7 +130,14 @@ def iter_text_messages(payload: dict[str, object]) -> Iterator[TextMessage]:
                 msg_id = message.get("id", "")
                 if not isinstance(body, str) or not isinstance(sender, str):
                     continue
-                yield TextMessage(sender=sender, text=body, msg_id=str(msg_id))
+                # Phase 9 C9.3 — strip control characters before the
+                # text ever touches the command router or tmux. Unicode
+                # + emoji survive unchanged.
+                yield TextMessage(
+                    sender=sender,
+                    text=sanitize_inbound_text(body),
+                    msg_id=str(msg_id),
+                )
 
 
 @dataclass(frozen=True, slots=True)
