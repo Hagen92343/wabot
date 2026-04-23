@@ -31,11 +31,17 @@ from tenacity import (
     wait_exponential,
 )
 
+from whatsbot.adapters.resilience import resilient
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.media_downloader import (
     DownloadedMedia,
     MediaDownloadError,
 )
+
+# Service name for the circuit breaker. The *same* breaker protects
+# every MetaMediaDownloader instance — one Meta outage trips all
+# media callers at once.
+META_MEDIA_SERVICE: Final[str] = "meta_media"
 
 DEFAULT_GRAPH_API_VERSION: Final[str] = "v23.0"
 DEFAULT_GRAPH_BASE_URL: Final[str] = "https://graph.facebook.com"
@@ -81,7 +87,12 @@ class MetaMediaDownloader:
         self._client = client
         self._log = get_logger("whatsbot.media_downloader")
 
+    @resilient(META_MEDIA_SERVICE)
     def download(self, media_id: str) -> DownloadedMedia:
+        # Note: tenacity retries happen *inside* one @resilient call,
+        # so three retries count as ONE breaker failure. That's the
+        # right shape — the user shouldn't see the circuit trip after
+        # three HTTP attempts on one request.
         if not media_id or not media_id.strip():
             raise MediaDownloadError("media_id leer")
         try:

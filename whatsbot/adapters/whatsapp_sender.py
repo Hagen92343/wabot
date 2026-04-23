@@ -14,8 +14,14 @@
 
 from __future__ import annotations
 
+from whatsbot.adapters.resilience import resilient
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.message_sender import MessageSender
+
+# Service-name registered in the circuit-breaker registry.
+# Kept in module scope so tests and /status can introspect via
+# :func:`resilience.get_breaker`.
+META_SEND_SERVICE: str = "meta_send"
 
 
 class LoggingMessageSender:
@@ -50,9 +56,12 @@ class WhatsAppCloudSender:
         self._phone_number_id = phone_number_id
         self._log = get_logger("whatsbot.sender.whatsapp")
 
+    @resilient(META_SEND_SERVICE)
     def send_text(self, *, to: str, body: str) -> None:
         # Intentional: this MUST raise so we don't silently 'succeed' while
         # nothing actually leaves the bot. C2.x replaces with httpx + retry.
+        # The @resilient decorator is wired now so C2.x only needs to drop
+        # in the httpx call — Spec §25 FMEA #1 protection is already here.
         raise NotImplementedError(
             "WhatsAppCloudSender.send_text is a Phase-1 skeleton. "
             "Use LoggingMessageSender until the real adapter lands in C2.x."

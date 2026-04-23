@@ -23,8 +23,15 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from whatsbot.adapters.resilience import resilient
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.audio_transcriber import TranscriptionError
+
+# Breaker service-name. whisper.cpp is a local binary so "outage"
+# here usually means broken model file / corrupted install; once
+# it surfaces we trip the breaker so we don't spin subprocesses
+# in a tight loop.
+WHISPER_SERVICE: str = "whisper"
 
 DEFAULT_TIMEOUT_SECONDS: float = 60.0
 DEFAULT_BINARY: str = "whisper-cli"
@@ -52,6 +59,7 @@ class WhisperCppTranscriber:
                 binary=self._binary,
             )
 
+    @resilient(WHISPER_SERVICE)
     def transcribe(
         self, wav_path: Path, *, language: str | None = None
     ) -> str:

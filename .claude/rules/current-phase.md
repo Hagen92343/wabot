@@ -1,37 +1,99 @@
 # Aktueller Stand
 
 **Aktive Phase**: Phase 8 — Observability + Limits
-**Aktiver Checkpoint**: **C8.3** — Circuit-Breaker für externe Adapter
-**Letzter abgeschlossener Checkpoint**: **C8.2** — /log + /errors + /ps
-+ /update (DiagnosticsService + FileLogReader + Command-Routen)
+**Aktiver Checkpoint**: **C8.4** — Prometheus /metrics-Endpoint
+**Letzter abgeschlossener Checkpoint**: **C8.3** — Circuit-Breaker
+(adapters/resilience.py + 3 Adapter dekoriert + MediaService-Handling)
 **User-Freigabe für Phase 8**: ✅ erteilt
 
 ## Wie ich in der nächsten Session weitermache
 
 1. Diese Datei lesen.
-2. `.claude/rules/phase-8.md` lesen — Sektion „C8.3 — Circuit-Breaker".
-3. `git log --oneline -4` für den Commit-Stand bis C8.2-Close.
+2. `.claude/rules/phase-8.md` lesen — Sektion „C8.4 — Prometheus /metrics".
+3. `git log --oneline -5` für den Commit-Stand bis C8.3-Close.
 4. `venv/bin/pytest tests/unit/ tests/integration/
    --ignore=tests/unit/test_hook_common.py
    --ignore=tests/integration/test_hook_script.py
    --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte **1442/1442 grün** (+ 1 skipped wenn ffmpeg fehlt)
-   zeigen. mypy --strict clean auf 116 source files. ruff
+   sollte **1470/1470 grün** (+ 1 skipped wenn ffmpeg fehlt)
+   zeigen. mypy --strict clean auf 117 source files. ruff
    clean (bis auf pre-existing E731 in `delete_service.py`).
-5. Mit **C8.3** anfangen — siehe `.claude/rules/phase-8.md`
-   Sektion „C8.3":
-   - `adapters/resilience.py` — `CircuitBreaker`-Klasse + `@resilient`-
-     Decorator. 5 Fehler in 60 s → 5 min OPEN → Half-Open-Probe →
-     CLOSED bei Erfolg / OPEN bei Fail.
-   - Decorator auf `WhatsAppCloudSender.send_text`,
-     `MetaMediaDownloader.download`, `WhisperCppTranscriber.transcribe`.
-   - `CircuitOpenError` mit `service_name` + `reopens_at`;
-     CommandHandler rendert `⚠️ [service] momentan nicht erreichbar,
-     re-try in 4m 32s.`.
-   - Tests: 8+ unit für CircuitBreaker (alle State-Transitions,
-     Thread-Safety), 2 integration (echter MetaMediaDownloader mit
-     httpx MockTransport 5x HTTP 503 → 6ter Call raise't
-     CircuitOpenError; clock advance → Probe).
+5. Mit **C8.4** anfangen — siehe `.claude/rules/phase-8.md`
+   Sektion „C8.4":
+   - `http/metrics.py` echter Router (ersetzt den Phase-1-Stub).
+     `MetricsRegistry`-Klasse mit Counters/Gauges/Histograms als
+     In-Memory-Dicts (keine prometheus_client-Dependency).
+   - `app.state.metrics_registry` als Singleton.
+   - Application-Services rufen `metrics.increment(...)` an den
+     richtigen Stellen: meta_webhook POST (inbound counter),
+     WhatsAppSender (outbound), TranscriptIngest Turn-End
+     (claude_turns + tokens), HookService.classify_bash (hook_decisions),
+     OutputPipeline (redaction_applied), LockService (session_active),
+     CircuitBreaker State-Transitions (circuit_state-gauge).
+   - ASGI-Middleware für Response-Latenz-Histogramme.
+   - Tests: 4+ unit MetricsRegistry (inc/set/observe + Render-Format),
+     2 integration (GET /metrics nach ein paar /webhook-Calls →
+     populated Counters; Binding auf localhost enforced).
+
+## C8.3 liefert (Live-Verhalten)
+
+- `adapters/resilience.py` hält den `CircuitBreaker` pro
+  `service_name` in einem module-scope Registry. `@resilient
+  (service_name)`-Decorator wickelt beliebige Callables ein, zählt
+  Fehler in einem Rolling-60s-Fenster, trippt nach 5 Fehlern auf
+  OPEN für 5 min, promotet zu HALF_OPEN auf den ersten Call nach
+  Cooldown, CLOSED bei Probe-Success / OPEN bei Probe-Failure.
+- Drei Adapter dekoriert:
+  - `WhatsAppCloudSender.send_text` → `meta_send`.
+  - `MetaMediaDownloader.download` → `meta_media` (tenacity-retries
+    zählen **eins**, nicht drei — das ist gewollt).
+  - `WhisperCppTranscriber.transcribe` → `whisper`.
+- `MediaService` fängt `CircuitOpenError` an allen drei Call-Sites
+  (Image/PDF-Download + Audio-Download + Whisper-Transcribe),
+  rendert user-facing `⚠️ [service] momentan nicht erreichbar,
+  re-try in 4m 32s.` (Helper `_format_circuit_reply` +
+  `_format_duration_seconds`). Neue `MediaOutcome.kind="circuit_open"`.
+- CircuitBreaker loggt jede State-Transition strukturiert:
+  `circuit_opened`, `circuit_half_open`, `circuit_closed`,
+  `circuit_reopened_after_probe`. Phase-8-C8.4-Metrics-Layer
+  greift später diese Events für den `circuit_state{service,state}`-
+  Gauge ab.
+- Thread-safety via `threading.Lock` auf Breaker-State +
+  Registry-Lookup. Sync-Adapter werden von Tests und vom Webhook
+  direkt aufgerufen; async-Pfade laufen über `asyncio.to_thread`
+  und serialisieren damit ebenfalls über den ThreadPool.
+
+## Phase-8-Architektur (C8.3-Layer)
+
+- **Adapter** (new): `whatsbot/adapters/resilience.py`.
+  - `CircuitState` StrEnum.
+  - `CircuitOpenError(service_name, reopens_at)`.
+  - `CircuitBreaker(service_name, failure_threshold=5,
+    window_seconds=60, cooldown_seconds=300, clock=time.monotonic)`.
+  - Test-Helper `_reset_registry_for_tests()` räumt die Registry
+    zwischen Tests.
+- **Decoration**: `@resilient(META_SEND_SERVICE)` /
+  `@resilient(META_MEDIA_SERVICE)` / `@resilient(WHISPER_SERVICE)`
+  über den drei Public-Methods. `LoggingMessageSender` bleibt
+  explizit un-dekoriert (local no-op).
+- **Application-Handling**: `media_service.py` importiert
+  `CircuitOpenError`, fängt ihn vor den jeweiligen
+  `MediaDownloadError`/`TranscriptionError`-Blöcken, und liefert
+  `MediaOutcome(kind="circuit_open", reply=_format_circuit_reply(exc))`.
+
+**Tests-Stand**: 1470/1470 passing (+1 skipped wenn ffmpeg fehlt).
+mypy --strict clean auf 117 source files. ruff clean auf allen
+angefassten Files. Neue Tests:
+- `tests/unit/test_resilience.py` — 22 Tests (alle State-Transitions,
+  Decorator-Semantik, gleicher service_name shares Breaker,
+  Thread-Safety-Smoke).
+- `tests/unit/test_media_service_circuit_open.py` — 3 Tests
+  (image/pdf/audio-Pfad liefern `kind="circuit_open"` + User-Reply).
+- `tests/integration/test_resilience_circuit_integration.py` — 3
+  Tests mit echtem MetaMediaDownloader + httpx MockTransport:
+  5x HTTP 503 trippen den `meta_media`-Breaker, 6ter Call
+  short-circuited ohne httpx-Call; clock advance → probe →
+  Recovery; probe-failure → OPEN mit frischer Cooldown.
 
 ## C8.2 liefert (Live-Verhalten)
 

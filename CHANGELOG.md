@@ -7,6 +7,66 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ### Phase 8 — Observability + Limits (in progress)
 
+#### C8.3 — Circuit-Breaker für externe Adapter ✅
+
+Spec §20 resilience + §25 FMEA #1 Meta-API-Outage ist live: Meta,
+Whisper und der zukünftige WhatsAppCloudSender tragen jetzt einen
+CircuitBreaker, der nach 5 Fehlern in 60 s für 5 min auf OPEN
+kippt, einen Half-Open-Probe durchlässt und bei Erfolg schließt.
+Ein flaky Meta schnell nacheinander anzuhauen macht jetzt nichts
+mehr kaputt — der Breaker short-circuited die Calls und der
+User kriegt eine freundliche Rückmeldung statt einer Kaskade
+von 3x-tenacity-retries pro Request.
+
+- **Adapter (neu)**: `adapters/resilience.py` —
+  `CircuitState` StrEnum (CLOSED/OPEN/HALF_OPEN), `CircuitOpenError
+  (service_name, reopens_at)`, `CircuitBreaker(service_name,
+  failure_threshold=5, window_seconds=60, cooldown_seconds=300,
+  clock=time.monotonic)`. Thread-sicher via `threading.Lock`.
+  `@resilient(service_name)`-Decorator bindet pro name einen
+  Breaker an das Module-Registry — mehrere Adapter-Instanzen
+  teilen sich also *einen* Breaker. Strukturiertes Logging jeder
+  State-Transition (`circuit_opened`, `circuit_half_open`,
+  `circuit_closed`, `circuit_reopened_after_probe`).
+- **Decoration**: Drei Adapter-Methoden sind jetzt dekoriert:
+  - `WhatsAppCloudSender.send_text` → service `meta_send`
+    (Skeleton bleibt, aber Decorator ist schon wired für C2.x).
+  - `MetaMediaDownloader.download` → service `meta_media`.
+    Tenacity-Retries passieren *innerhalb* eines @resilient-Calls
+    und zählen zusammen als EINE Breaker-Failure — Spec-konform.
+  - `WhisperCppTranscriber.transcribe` → service `whisper`.
+- **Application-Handling**: `MediaService` fängt `CircuitOpenError`
+  an allen drei external-service-Call-Sites (Image/PDF-Download,
+  Audio-Download, Whisper-Transcribe), rendert die User-Reply
+  über `_format_circuit_reply(exc)` +
+  `_format_duration_seconds(seconds)`: `⚠️ [meta_media] momentan
+  nicht erreichbar, re-try in 4m 32s.`. Neue `MediaOutcome.kind=
+  "circuit_open"`, dokumentiert in der Outcome-Docstring.
+
+**Tests** (28 neue, alle grün):
+- `tests/unit/test_resilience.py` — 22 Tests. Alle State-
+  Transitions (CLOSED→OPEN bei N-Failures-in-window, Failures
+  außerhalb Window zählen nicht, Success resettet Counter,
+  OPEN raise't ohne wrapped-Call, Cooldown → HALF_OPEN,
+  concurrent HALF_OPEN → zweiter rejected, probe success →
+  CLOSED, probe failure → OPEN mit fresh cooldown,
+  Decorator-Semantik, shared-vs-isolated service_name,
+  `__wrapped__`/`__name__`/`__doc__`-preservation,
+  BaseException-handling, Thread-Safety-Smoke mit 4 Threads).
+- `tests/unit/test_media_service_circuit_open.py` — 3 Tests
+  (image / pdf / audio — jeder gibt `kind="circuit_open"`
+  + friendly reply mit service-name zurück).
+- `tests/integration/test_resilience_circuit_integration.py` —
+  3 Tests mit echtem MetaMediaDownloader + httpx MockTransport:
+  5x HTTP 503 trippen den `meta_media`-Breaker; 6ter download-
+  Call short-circuited ohne httpx-Kontakt; clock advance → Probe
+  läuft mit healthy backend → CLOSED; Probe-Failure → fresh OPEN
+  mit späterem `reopens_at`.
+
+**Tests-Stand**: 1470/1470 grün (C8.2 Baseline 1442 + 28).
+mypy `--strict` clean auf 117 source files. ruff clean auf allen
+angefassten Files.
+
 #### C8.2 — Diagnostics-Commands (/log /errors /ps /update) ✅
 
 Die Spec-§11-Diagnose-Commands gehen live. Vom Handy aus ist

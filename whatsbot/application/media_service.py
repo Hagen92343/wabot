@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from whatsbot.adapters.resilience import CircuitOpenError
 from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.session_service import SessionService
 from whatsbot.domain.magic_bytes import (
@@ -63,6 +64,8 @@ class MediaOutcome:
     * ``"no_active_project"`` — no ``/p`` set, user must pick one.
     * ``"validation_failed"`` — size / MIME / magic-bytes reject.
     * ``"download_failed"`` — network or Meta-side error.
+    * ``"circuit_open"`` — external service (Meta / Whisper) has
+      been flaky and the breaker is keeping requests away from it.
     * ``"conversion_failed"`` — ffmpeg couldn't produce a valid WAV.
     * ``"unsupported"`` — kind is video/sticker/location/contact/unknown.
 
@@ -184,6 +187,20 @@ class MediaService:
 
         try:
             raw_transcript = self._audio_transcriber.transcribe(wav_path)
+        except CircuitOpenError as exc:
+            self._log.warning(
+                "audio_transcription_circuit_open",
+                project=project,
+                media_id=media_id,
+                service=exc.service_name,
+            )
+            return MediaOutcome(
+                kind="circuit_open",
+                reply=_format_circuit_reply(exc),
+                project=project,
+                cache_path=staged.cache_path,
+                wav_path=wav_path,
+            )
         except TranscriptionError as exc:
             self._log.warning(
                 "audio_transcription_failed",
@@ -299,6 +316,18 @@ class MediaService:
 
         try:
             downloaded = self._downloader.download(media_id)
+        except CircuitOpenError as exc:
+            self._log.warning(
+                "media_download_circuit_open",
+                kind=MediaKind.AUDIO.value,
+                media_id=media_id,
+                service=exc.service_name,
+            )
+            return MediaOutcome(
+                kind="circuit_open",
+                reply=_format_circuit_reply(exc),
+                project=project,
+            )
         except MediaDownloadError as exc:
             self._log.warning(
                 "media_download_failed",
@@ -424,6 +453,18 @@ class MediaService:
         # 2. Download.
         try:
             downloaded = self._downloader.download(media_id)
+        except CircuitOpenError as exc:
+            self._log.warning(
+                "media_download_circuit_open",
+                kind=kind.value,
+                media_id=media_id,
+                service=exc.service_name,
+            )
+            return MediaOutcome(
+                kind="circuit_open",
+                reply=_format_circuit_reply(exc),
+                project=project,
+            )
         except MediaDownloadError as exc:
             self._log.warning(
                 "media_download_failed",
@@ -539,3 +580,34 @@ _KIND_LABEL: Final[dict[MediaKind, str]] = {
     MediaKind.AUDIO: "Voice",
     MediaKind.DOCUMENT: "PDF",
 }
+
+
+def _format_circuit_reply(exc: CircuitOpenError) -> str:
+    """Render a user-facing ⚠️-reply describing an open circuit.
+
+    The breaker uses ``time.monotonic()`` timestamps so we compare
+    against the same clock. Reopen distance in the distant past
+    (clock skew / already-elapsed race) renders as ``<1s``.
+    """
+    import time as _time
+
+    remaining = exc.reopens_at - _time.monotonic()
+    eta = "<1s" if remaining <= 0 else _format_duration_seconds(remaining)
+    return (
+        f"⚠️ [{exc.service_name}] momentan nicht erreichbar, "
+        f"re-try in {eta}."
+    )
+
+
+def _format_duration_seconds(total_seconds: float) -> str:
+    """Human-friendly countdown formatter. ``"3h 22m"`` / ``"42m 5s"`` /
+    ``"15s"``."""
+    total = int(total_seconds)
+    if total >= 3600:
+        hours, rem = divmod(total, 3600)
+        minutes = rem // 60
+        return f"{hours}h {minutes:02d}m"
+    if total >= 60:
+        minutes, seconds = divmod(total, 60)
+        return f"{minutes}m {seconds:02d}s"
+    return f"{total}s"
