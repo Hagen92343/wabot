@@ -29,6 +29,7 @@ from whatsbot.application.delete_service import (
     PendingDeleteExpiredError,
 )
 from whatsbot.application.force_service import ForceService
+from whatsbot.application.kill_service import KillService
 from whatsbot.application.lock_service import (
     LocalTerminalHoldsLockError,
     LockService,
@@ -76,6 +77,10 @@ _MODE_PREFIX: Final = "/mode "
 _RELEASE_COMMAND: Final = "/release"
 _RELEASE_PREFIX: Final = "/release "
 _FORCE_PREFIX: Final = "/force "
+_STOP_COMMAND: Final = "/stop"
+_STOP_PREFIX: Final = "/stop "
+_KILL_COMMAND: Final = "/kill"
+_KILL_PREFIX: Final = "/kill "
 
 
 class CommandHandler:
@@ -99,6 +104,7 @@ class CommandHandler:
         mode_service: ModeService | None = None,
         lock_service: LockService | None = None,
         force_service: ForceService | None = None,
+        kill_service: KillService | None = None,
     ) -> None:
         self._projects = project_service
         self._allow = allow_service
@@ -112,6 +118,7 @@ class CommandHandler:
         self._modes = mode_service
         self._locks = lock_service
         self._force = force_service
+        self._kill = kill_service
         self._log = get_logger("whatsbot.commands")
 
     # ---- entrypoint -------------------------------------------------------
@@ -160,6 +167,18 @@ class CommandHandler:
         # /force <name> <PIN> <prompt> (Phase 5 C5.4)
         if cmd.startswith(_FORCE_PREFIX):
             return self._handle_force(cmd[len(_FORCE_PREFIX) :].strip())
+
+        # /stop + /stop <name> (Phase 6 C6.1)
+        if cmd == _STOP_COMMAND:
+            return self._handle_stop(None)
+        if cmd.startswith(_STOP_PREFIX):
+            return self._handle_stop(cmd[len(_STOP_PREFIX) :].strip())
+
+        # /kill + /kill <name> (Phase 6 C6.1)
+        if cmd == _KILL_COMMAND:
+            return self._handle_kill(None)
+        if cmd.startswith(_KILL_PREFIX):
+            return self._handle_kill(cmd[len(_KILL_PREFIX) :].strip())
 
         # Non-slash text → prompt to the active project (Phase-4
         # C4.2c). Empty text falls through to the default help
@@ -758,6 +777,92 @@ class CommandHandler:
                 f"📨 an {outcome.project_name}: {_preview(prompt)}"
             ),
             command="/force",
+        )
+
+    # ---- /stop + /kill (Phase 6 C6.1) ------------------------------------
+
+    def _resolve_target_project(
+        self, raw_name: str | None, *, command: str
+    ) -> tuple[str | None, CommandResult | None]:
+        """Pick the project ``raw_name`` refers to, defaulting to the
+        active one. Returns ``(name, None)`` on success or
+        ``(None, error_reply)`` when the user needs a hint.
+        """
+        if raw_name:
+            try:
+                return validate_project_name(raw_name), None
+            except InvalidProjectNameError as exc:
+                return None, CommandResult(reply=f"⚠️ {exc}", command=command)
+        active = self._active.get_active()
+        if active is None:
+            return None, CommandResult(
+                reply=(
+                    "kein aktives Projekt — setze eines mit /p <name> "
+                    f"oder gib {command} <name> an."
+                ),
+                command=command,
+            )
+        return active, None
+
+    def _handle_stop(self, raw_name: str | None) -> CommandResult:
+        """Send Ctrl+C to the named (or active) project's tmux pane."""
+        if self._kill is None:
+            return CommandResult(
+                reply="⚠️ Kill-Service nicht konfiguriert.",
+                command="/stop",
+            )
+        name, err = self._resolve_target_project(raw_name, command="/stop")
+        if err is not None:
+            return err
+        assert name is not None
+        try:
+            outcome = self._kill.stop(name)
+        except (TmuxError, FileNotFoundError, OSError) as exc:
+            self._log.error("stop_failed", project=name, error=str(exc))
+            return CommandResult(
+                reply=f"⚠️ /stop an '{name}' fehlgeschlagen: {exc}",
+                command="/stop",
+            )
+        if not outcome.was_alive:
+            return CommandResult(
+                reply=f"'{outcome.project_name}' hatte keine aktive Session.",
+                command="/stop",
+            )
+        return CommandResult(
+            reply=f"🛑 Ctrl+C an '{outcome.project_name}' geschickt.",
+            command="/stop",
+        )
+
+    def _handle_kill(self, raw_name: str | None) -> CommandResult:
+        """Destroy the project's tmux session. Lock gets released."""
+        if self._kill is None:
+            return CommandResult(
+                reply="⚠️ Kill-Service nicht konfiguriert.",
+                command="/kill",
+            )
+        name, err = self._resolve_target_project(raw_name, command="/kill")
+        if err is not None:
+            return err
+        assert name is not None
+        try:
+            outcome = self._kill.kill(name)
+        except (TmuxError, FileNotFoundError, OSError) as exc:
+            self._log.error("kill_failed", project=name, error=str(exc))
+            return CommandResult(
+                reply=f"⚠️ /kill an '{name}' fehlgeschlagen: {exc}",
+                command="/kill",
+            )
+        if not outcome.was_alive:
+            return CommandResult(
+                reply=f"'{outcome.project_name}' hatte keine aktive Session.",
+                command="/kill",
+            )
+        suffix = " · Lock freigegeben" if outcome.lock_released else ""
+        return CommandResult(
+            reply=(
+                f"🪓 '{outcome.project_name}' tmux-Session beendet{suffix}."
+            ),
+            command="/kill",
         )
 
     # ---- helpers ----------------------------------------------------------

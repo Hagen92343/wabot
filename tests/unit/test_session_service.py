@@ -59,6 +59,9 @@ class FakeTmuxController:
     def send_text(self, name: str, text: str) -> None:
         self.send_text_calls.append((name, text))
 
+    def interrupt(self, name: str) -> None:
+        del name
+
     def kill_session(self, name: str) -> bool:
         self.kill_session_calls.append(name)
         existed = name in self._alive

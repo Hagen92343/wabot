@@ -1,8 +1,64 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 5 abgeschlossen ✅ — wartet auf User-Freigabe für Phase 6
-**Aktiver Checkpoint**: — (Phase 5 komplett, Phase 6 noch nicht begonnen)
-**Letzter abgeschlossener Checkpoint**: Phase-5-Close (CHANGELOG + Sammel-Commit)
+**Aktive Phase**: Phase 6 — Kill-Switch + Watchdog + Sleep-Handling (in progress)
+**Aktiver Checkpoint**: **C6.2** — `/panic` (vollständige Eskalation, <2s)
+**Letzter abgeschlossener Checkpoint**: C6.1 (`/stop` + `/kill` + neue `TmuxController.interrupt`)
+
+## Phase 6 — laufender Stand (zum Wiederaufnehmen)
+
+- ✅ **C6.1** — `/stop` + `/kill`:
+  - `TmuxController.interrupt(name)`-Protocol-Methode neu (sendet
+    `C-c` als tmux key event, kein Enter, kein `-l`-Literal). Adapter
+    + alle 5 FakeTmux-Varianten in den Tests aktualisiert.
+  - `application/kill_service.py` mit `stop(name)` (Soft-Cancel via
+    `tmux interrupt`, Session bleibt am Leben) und `kill(name)`
+    (Hard-Kill via `tmux kill_session` + `lock_service.release`).
+    Lock-Release-Failures werden geloggt aber nie hochpropagiert
+    (Pane war ja schon weg). `claude_sessions`-Row bleibt bei
+    `/kill` — Resume-fähig auf next `/p`.
+  - `CommandHandler` routet `/stop`, `/stop <name>`, `/kill`,
+    `/kill <name>`. Helper `_resolve_target_project` defaultet auf
+    aktives Projekt, validiert Name, liefert sauberen Hint wenn
+    kein aktives Projekt + kein Argument. Replies:
+    `🛑 Ctrl+C an '...' geschickt.` /
+    `🪓 '...' tmux-Session beendet · Lock freigegeben.`.
+    Friendly `'...' hatte keine aktive Session.` wenn Pane
+    schon tot.
+  - `main.py` baut KillService nur wenn tmux vorhanden,
+    wired ins CommandHandler-`kill_service`-Param.
+  - 9 unit tests `test_kill_service.py` (Soft-Cancel, Hard-Kill +
+    Lock-Release, Lock-Failure-Containment, no-LockService-Pfad,
+    TmuxError-Propagation, InvalidProjectName).
+  - 11 unit tests `test_kill_command.py` (mit-Name + ohne-Name,
+    no-active-Pfad, dead-Session-Friendly-Reply, no-config-Guard,
+    Lock-Suffix nur wenn was zum Releasen war).
+  - 2 e2e `test_kill_e2e.py` (real tmux, signed /webhook,
+    `/stop` lässt Session leben, `/kill` killt + released).
+
+**Tests-Stand**: 1015/1015 passing (993 + 22 C6.1-Tests).
+mypy `--strict` clean auf allen 81 source files, ruff clean auf
+allen angefassten Dateien.
+
+### Was noch offen in Phase 6
+
+- ⏭ **C6.2** — `/panic` Vollkatastrophe in <2s:
+  Lockdown setzen + Touch-File → wb-* enumerieren + kill_session
+  pro Session → `pkill -9 -f claude` Backstop → YOLO→Normal
+  pro Projekt → Locks releasen → macOS-Notification.
+- ⏭ **C6.3** — YOLO-Reset bei Panic (mode_events `panic_reset`).
+- ⏭ **C6.4** — Heartbeat-Pumper + Watchdog-LaunchAgent.
+- ⏭ **C6.5** — pmset Sleep/Wake-Handling.
+- ⏭ **C6.6** — `/unlock <PIN>` + Lockdown-Filter im CommandHandler.
+- ⏭ **C6.7** — Edge-Cases + macOS-Notification.
+
+### Wie wiedereinsteigen
+
+1. Diese Datei lesen.
+2. `.claude/rules/phase-6.md` (Plan-Doc).
+3. `git log --oneline -12` für den Commit-Stand.
+4. `venv/bin/pytest tests/unit/ tests/integration/ --ignore=tests/unit/test_hook_common.py --ignore=tests/integration/test_hook_script.py --ignore=tests/integration/test_hook_fail_closed.py`
+   sollte 1015/1015 grün zeigen.
+5. Mit **C6.2** starten — siehe Plan oben.
 
 ## Phase 5 — laufender Stand (zum Wiederaufnehmen)
 

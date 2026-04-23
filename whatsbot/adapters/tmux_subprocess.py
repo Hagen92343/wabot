@@ -96,6 +96,20 @@ class SubprocessTmuxController:
                 f"send-keys Enter failed for {name!r}: {enter.stderr.strip()}"
             )
 
+    def interrupt(self, name: str) -> None:
+        # Single send-keys with the tmux key event ``C-c`` (no -l, no
+        # Enter). tmux translates that into Ctrl+C on the foreground
+        # process, which Claude Code receives as SIGINT.
+        completed = self._run(
+            ["send-keys", "-t", name, "C-c"], check=False
+        )
+        if completed.returncode != 0:
+            raise TmuxError(
+                f"send-keys C-c failed for {name!r}: "
+                f"{completed.stderr.strip()}"
+            )
+        self._log.info("tmux_interrupt_sent", name=name)
+
     # ---- theming -------------------------------------------------------
 
     def set_status(self, name: str, *, color: str, label: str) -> None:

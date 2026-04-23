@@ -6,9 +6,9 @@ process, and the bot drives it via ``send_text``. This Protocol is
 intentionally narrow — each method maps to a single ``tmux`` subcommand
 so the concrete adapter stays audit-friendly.
 
-Phase 4 uses the methods below. ``capture_pane`` (for the Phase-8
-max-limit status-line parser) and ``send_control`` (for Phase-6's
-``/stop`` Ctrl+C path) will be added when those phases land — not now.
+Phase 4 uses the basic methods. Phase 6 adds ``interrupt`` for the
+``/stop`` Ctrl+C path. ``capture_pane`` (Phase 8 max-limit
+status-line parser) lands later.
 """
 
 from __future__ import annotations
@@ -44,6 +44,14 @@ class TmuxController(Protocol):
 
     def kill_session(self, name: str) -> bool:
         """Destroy the session. Returns ``True`` iff one was killed."""
+
+    def interrupt(self, name: str) -> None:
+        """Send Ctrl+C to the session's current pane (Phase 6 ``/stop``).
+
+        Different from ``send_text``: no Enter, no literal-mode — the
+        adapter must pass ``C-c`` as a tmux key event so the running
+        Claude process receives SIGINT, not a 3-character literal.
+        """
 
     def list_sessions(self, *, prefix: str | None = None) -> list[str]:
         """Return session names, optionally filtered to those starting

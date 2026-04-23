@@ -59,6 +59,7 @@ from whatsbot.application.confirmation_coordinator import ConfirmationCoordinato
 from whatsbot.application.delete_service import DeleteService
 from whatsbot.application.force_service import ForceService
 from whatsbot.application.hook_service import HookService
+from whatsbot.application.kill_service import KillService
 from whatsbot.application.lock_service import LockService
 from whatsbot.application.mode_service import ModeService
 from whatsbot.application.output_service import OutputService
@@ -335,6 +336,13 @@ def create_app(
             secrets=secrets_for_router,
         )
 
+    # KillService backs ``/stop`` and ``/kill`` (Phase 6 C6.1). Needs
+    # tmux to do anything useful; lock_service is optional but normally
+    # present in the same wiring conditions.
+    kill_service: KillService | None = None
+    if tmux is not None:
+        kill_service = KillService(tmux=tmux, lock_service=lock_service)
+
     command_handler = CommandHandler(
         project_service=project_service,
         allow_service=allow_service,
@@ -347,6 +355,7 @@ def create_app(
         mode_service=mode_service,
         lock_service=lock_service,
         force_service=force_service,
+        kill_service=kill_service,
     )
 
     app = FastAPI(
