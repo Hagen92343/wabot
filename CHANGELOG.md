@@ -5,7 +5,80 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
-### Phase 8 — Observability + Limits (in progress)
+### Phase 8 — Observability + Limits (complete) ✅
+
+Alle vier Checkpoints grün. Phase 8 ist damit inhaltlich
+abgeschlossen — Max-Limit-Persistenz, Diagnose-Commands,
+Circuit-Breaker, Prometheus-Metrics. Wartet auf User-Freigabe
+für Phase 9 (Docs + Smoke-Tests + Polish).
+
+#### C8.4 — Prometheus /metrics-Endpoint ✅
+
+Der Phase-1-Stub auf `GET /metrics` wird durch echte
+Prometheus-Text-Exposition ersetzt. Kein `prometheus_client`-
+Dependency — das Exposition-Format ist simpel genug für eine
+eigene Implementierung und Spec §5's vierfacher Subscription-
+Lock macht jede extra Dependency zur Risikoquelle.
+
+- **HTTP (neu)**: `http/metrics.py` — `MetricsRegistry`-Klasse
+  mit Counter/Gauge/Histogram als thread-sicheren in-memory
+  dicts (`threading.Lock`). API: `increment(name, *, value=1,
+  labels, help_text)`, `set_gauge(name, value, *, labels)`,
+  `observe(name, value, *, labels, buckets)`, `render()`.
+  `DEFAULT_LATENCY_BUCKETS = (0.05, 0.1, 0.2, 0.5, 1.0, 2.0,
+  5.0)` straddlet Spec §20's P95-700ms-Budget.
+  `ResponseLatencyMiddleware` (BaseHTTPMiddleware-subclass)
+  observiert jede Response mit coarse path-buckets
+  (`webhook`/`hook`/`metrics`/`health`/`other`) × status-classes
+  (`2xx`/`3xx`/`4xx`/`5xx`) — verhindert Kardinalitäts-
+  Explosion.
+- **Adapter (neu)**: `adapters/metrics_sender.py` —
+  `MetricsMessageSender` wrapt jeden MessageSender, bumpt
+  `whatsbot_messages_total{direction="out",kind="text"}` nur
+  bei erfolgreichem send (Exception-Pfad zählt nicht, weil
+  ein nicht-gesendeter Send keiner ist).
+- **Resilience-Hook**: `adapters/resilience.py` bekommt
+  `set_state_observer(fn)` + module-level `_STATE_OBSERVER`-Callback.
+  `_notify_state(service, new_state)` feuert bei jeder echten
+  State-Transition (CLOSED→OPEN, OPEN→HALF_OPEN, HALF_OPEN→
+  CLOSED, HALF_OPEN→OPEN). Observer-Fehler werden via
+  `contextlib.suppress(Exception)` geschluckt.
+- **meta_webhook.py**: `build_router` akzeptiert optional
+  `metrics_registry` und bumpt `whatsbot_messages_total
+  {direction="in",kind=...}` nach Whitelist-Pass sowohl für
+  Text- als auch Media-Messages. Rejected senders bumpen
+  nicht (Gate greift vor dem Counter).
+- **main.py**: `MetricsRegistry` wird früh gebaut (damit
+  MetricsMessageSender schon im Sender-Chain sitzt),
+  `ResponseLatencyMiddleware` als outermost Middleware
+  eingehängt (damit Histogram auch die constant-time-padding
+  erfasst). Circuit-Observer wird als Callback gesetzt, der
+  für jede Transition alle CircuitStates pro Service auf 0/1
+  setzt — Prometheus kann `sum by (state)` machen.
+- **Endpoint**: `GET /metrics` auf dem Hauptport 8000, der via
+  Phase-1-Invariante an `settings.bind_host` (default
+  `127.0.0.1`) bindet — niemals über den Cloudflare-Tunnel
+  erreichbar.
+
+**Tests** (31 neue, alle grün):
+- `test_metrics_registry.py` — 21 Tests (counter
+  accumulate/value, gauge set/read, histogram
+  buckets/sum/totals/custom-buckets, render format inkl. label-
+  escape + type comments + sort-stability, thread-safety smoke
+  mit 4 Threads × 1000 increments, parametrized label
+  rendering).
+- `test_metrics_wiring.py` — 6 Tests (MetricsMessageSender
+  increments on success, no-count on send-failure,
+  circuit-observer gauge flip on open → close, observer
+  exception does not kill breaker).
+- `test_metrics_e2e.py` — 5 Tests (signed /webhook → counters
+  populated, histogram series present, content-type
+  text/plain, rejected sender does not bump, endpoint empty
+  before traffic).
+
+**Tests-Stand**: 1501/1501 grün (C8.3 Baseline 1470 + 31).
+mypy `--strict` clean auf 119 source files, ruff clean auf
+allen angefassten Files.
 
 #### C8.3 — Circuit-Breaker für externe Adapter ✅
 

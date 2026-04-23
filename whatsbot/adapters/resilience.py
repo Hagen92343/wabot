@@ -35,6 +35,7 @@ events with the service name.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from collections.abc import Callable
@@ -134,6 +135,7 @@ class CircuitBreaker:
         probe already in flight.
         """
         now = self._clock()
+        transitioned_to: CircuitState | None = None
         with self._lock:
             state = self._state.state
             if state is CircuitState.OPEN:
@@ -144,21 +146,21 @@ class CircuitBreaker:
                 # call be the probe.
                 self._state.state = CircuitState.HALF_OPEN
                 self._state.probe_in_flight = True
+                transitioned_to = CircuitState.HALF_OPEN
                 self._log.warning(
                     "circuit_half_open",
                     service=self._name,
                 )
-                return
-            if state is CircuitState.HALF_OPEN:
+            elif state is CircuitState.HALF_OPEN:
                 if self._state.probe_in_flight:
                     raise CircuitOpenError(
                         self._name, self._state.reopens_at
                     )
                 # No probe in flight yet — hand this call the role.
                 self._state.probe_in_flight = True
-                return
             # CLOSED — just pass through.
-            return
+        if transitioned_to is not None:
+            _notify_state(self._name, transitioned_to)
 
     def record_success(self) -> None:
         """Close the circuit if the probe succeeded; clear counters."""
@@ -173,11 +175,14 @@ class CircuitBreaker:
             self._state.reopens_at = 0.0
             if was_half_open:
                 self._log.info("circuit_closed", service=self._name)
+        if was_half_open:
+            _notify_state(self._name, CircuitState.CLOSED)
 
     def record_failure(self) -> None:
         """Count a failure. Trip if we crossed the threshold inside
         the sliding window, or re-open if we were HALF_OPEN."""
         now = self._clock()
+        transitioned_to: CircuitState | None = None
         with self._lock:
             if self._state.state is CircuitState.HALF_OPEN:
                 # Probe failed — re-open with a fresh cooldown.
@@ -186,37 +191,69 @@ class CircuitBreaker:
                 self._state.reopens_at = now + self._cooldown
                 self._state.probe_in_flight = False
                 self._state.failure_timestamps.clear()
+                transitioned_to = CircuitState.OPEN
                 self._log.warning(
                     "circuit_reopened_after_probe",
                     service=self._name,
                     reopens_at=self._state.reopens_at,
                 )
-                return
-
-            # CLOSED — slide the window and count.
-            window_start = now - self._window
-            self._state.failure_timestamps = [
-                ts for ts in self._state.failure_timestamps if ts >= window_start
-            ]
-            self._state.failure_timestamps.append(now)
-            if len(self._state.failure_timestamps) >= self._threshold:
-                self._state.state = CircuitState.OPEN
-                self._state.opened_at = now
-                self._state.reopens_at = now + self._cooldown
-                self._state.failure_timestamps.clear()
-                self._log.warning(
-                    "circuit_opened",
-                    service=self._name,
-                    reopens_at=self._state.reopens_at,
-                    threshold=self._threshold,
-                    window_s=self._window,
-                )
+            else:
+                # CLOSED — slide the window and count.
+                window_start = now - self._window
+                self._state.failure_timestamps = [
+                    ts for ts in self._state.failure_timestamps if ts >= window_start
+                ]
+                self._state.failure_timestamps.append(now)
+                if len(self._state.failure_timestamps) >= self._threshold:
+                    self._state.state = CircuitState.OPEN
+                    self._state.opened_at = now
+                    self._state.reopens_at = now + self._cooldown
+                    self._state.failure_timestamps.clear()
+                    transitioned_to = CircuitState.OPEN
+                    self._log.warning(
+                        "circuit_opened",
+                        service=self._name,
+                        reopens_at=self._state.reopens_at,
+                        threshold=self._threshold,
+                        window_s=self._window,
+                    )
+        if transitioned_to is not None:
+            _notify_state(self._name, transitioned_to)
 
 
 # ---- @resilient decorator ------------------------------------------
 
 _REGISTRY: dict[str, CircuitBreaker] = {}
 _REGISTRY_LOCK = threading.Lock()
+
+# Module-level observer hook — set by main.py at startup to pipe
+# state transitions into the Prometheus MetricsRegistry. Left as a
+# plain function callable so resilience.py doesn't depend on the
+# http layer.
+_STATE_OBSERVER: Callable[[str, CircuitState], None] | None = None
+
+
+def set_state_observer(
+    observer: Callable[[str, CircuitState], None] | None,
+) -> None:
+    """Register a callback fired on every CircuitBreaker state
+    transition. Pass ``None`` to unregister (used in tests).
+
+    The callback receives ``(service_name, new_state)`` and must be
+    crash-safe — the breaker swallows exceptions from it so an
+    observer bug can't topple the call path.
+    """
+    global _STATE_OBSERVER
+    _STATE_OBSERVER = observer
+
+
+def _notify_state(service_name: str, new_state: CircuitState) -> None:
+    observer = _STATE_OBSERVER
+    if observer is None:
+        return
+    # Observer bugs must NEVER kill the breaker path.
+    with contextlib.suppress(Exception):
+        observer(service_name, new_state)
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -273,8 +310,10 @@ def _reset_registry_for_tests() -> None:
     """Test-only helper — drops the module-level registry so each
     test starts with fresh breakers. Not part of the public API.
     """
+    global _STATE_OBSERVER
     with _REGISTRY_LOCK:
         _REGISTRY.clear()
+    _STATE_OBSERVER = None
 
 
 __all__ = [
@@ -287,4 +326,5 @@ __all__ = [
     "get_breaker",
     "list_breakers",
     "resilient",
+    "set_state_observer",
 ]

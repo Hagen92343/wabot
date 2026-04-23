@@ -1,39 +1,98 @@
 # Aktueller Stand
 
-**Aktive Phase**: Phase 8 — Observability + Limits
-**Aktiver Checkpoint**: **C8.4** — Prometheus /metrics-Endpoint
-**Letzter abgeschlossener Checkpoint**: **C8.3** — Circuit-Breaker
-(adapters/resilience.py + 3 Adapter dekoriert + MediaService-Handling)
+**Aktive Phase**: Phase 8 **abgeschlossen** ✅ — wartet auf Freigabe
+für **Phase 9 — Docs + Smoke-Tests + Polish**
+**Letzter abgeschlossener Checkpoint**: **C8.4** — Prometheus /metrics
+(MetricsRegistry + ResponseLatencyMiddleware + 3 Instrumentierungspunkte)
 **User-Freigabe für Phase 8**: ✅ erteilt
 
 ## Wie ich in der nächsten Session weitermache
 
 1. Diese Datei lesen.
-2. `.claude/rules/phase-8.md` lesen — Sektion „C8.4 — Prometheus /metrics".
-3. `git log --oneline -5` für den Commit-Stand bis C8.3-Close.
+2. Spec §21 Phase 9 + `.claude/rules/phases-3-to-9.md` Phase-9-Stub
+   lesen — Docs-Vervollständigung + tests/smoke.py + Polish.
+3. `git log --oneline -8` für den Commit-Stand bis C8.4-Close
+   (Phase-8-Abschluss).
 4. `venv/bin/pytest tests/unit/ tests/integration/
    --ignore=tests/unit/test_hook_common.py
    --ignore=tests/integration/test_hook_script.py
    --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte **1470/1470 grün** (+ 1 skipped wenn ffmpeg fehlt)
-   zeigen. mypy --strict clean auf 117 source files. ruff
+   sollte **1501/1501 grün** (+ 1 skipped wenn ffmpeg fehlt)
+   zeigen. mypy --strict clean auf 119 source files. ruff
    clean (bis auf pre-existing E731 in `delete_service.py`).
-5. Mit **C8.4** anfangen — siehe `.claude/rules/phase-8.md`
-   Sektion „C8.4":
-   - `http/metrics.py` echter Router (ersetzt den Phase-1-Stub).
-     `MetricsRegistry`-Klasse mit Counters/Gauges/Histograms als
-     In-Memory-Dicts (keine prometheus_client-Dependency).
-   - `app.state.metrics_registry` als Singleton.
-   - Application-Services rufen `metrics.increment(...)` an den
-     richtigen Stellen: meta_webhook POST (inbound counter),
-     WhatsAppSender (outbound), TranscriptIngest Turn-End
-     (claude_turns + tokens), HookService.classify_bash (hook_decisions),
-     OutputPipeline (redaction_applied), LockService (session_active),
-     CircuitBreaker State-Transitions (circuit_state-gauge).
-   - ASGI-Middleware für Response-Latenz-Histogramme.
-   - Tests: 4+ unit MetricsRegistry (inc/set/observe + Render-Format),
-     2 integration (GET /metrics nach ein paar /webhook-Calls →
-     populated Counters; Binding auf localhost enforced).
+5. **Vor Beginn Phase 9**: `.claude/rules/phase-9.md` schreiben
+   (gleiche Struktur wie phase-8.md), basierend auf Spec §21
+   Phase 9 + den Gotchas aus `phases-3-to-9.md`. User reviewen
+   lassen, *dann* erst implementieren.
+
+## C8.4 liefert (Live-Verhalten)
+
+- `GET /metrics` auf dem Hauptport (127.0.0.1:8000) rendert
+  Prometheus-Textformat mit Counters + Gauges + Histograms.
+  Tunnel-unreachable dank Phase-1-Invariante (Binding auf
+  `settings.bind_host` default 127.0.0.1).
+- `http/metrics.py` hält `MetricsRegistry` + `ResponseLatencyMiddleware`.
+  Kein `prometheus_client`-Dependency — handrolled Format.
+- Instrumentierte Hot-Paths:
+  - Meta-Webhook POST → `whatsbot_messages_total{direction="in",
+    kind="text"|"image"|"document"|"audio"|...}` nach Whitelist-Gate.
+  - `MetricsMessageSender` als Outermost-Wrapper um den MessageSender
+    → `whatsbot_messages_total{direction="out",kind="text"}` nur
+    bei erfolgreichem send (kein Increment auf Exception-Pfad).
+  - `ResponseLatencyMiddleware` (outermost) → histogram
+    `whatsbot_response_latency_seconds{path,status_class}` mit
+    coarse path-buckets (`webhook` / `hook` / `metrics` / `health` /
+    `other`) × 2xx/3xx/4xx/5xx.
+  - CircuitBreaker State-Transitions → `whatsbot_circuit_state
+    {service,state}` Gauge (0/1 pro state). `set_state_observer(fn)`
+    registriert die Callback in `adapters/resilience.py`; main.py
+    verdrahtet das in die App-Registry.
+
+## Phase-8-Architektur (C8.4-Layer)
+
+- **HTTP** (new): `whatsbot/http/metrics.py` — `MetricsRegistry`-
+  Klasse (Counter/Gauge/Histogram als in-memory dicts,
+  `threading.Lock` geschützt), `_render_counters` /
+  `_render_gauges` / `_render_histograms` für Text-Format.
+  `_bucket_path` / `_bucket_status` halten Label-Kardinalität
+  low. `ResponseLatencyMiddleware` subclasst `BaseHTTPMiddleware`,
+  observiert jede Response über alle Pfade.
+- **Adapter** (new): `whatsbot/adapters/metrics_sender.py` —
+  dünner Wrapper um MessageSender.
+- **Resilience-Hook**: `adapters/resilience.py` hat jetzt
+  `set_state_observer(fn)` + module-level `_STATE_OBSERVER`. Das
+  FSM feuert `_notify_state(service, new_state)` bei jeder echten
+  State-Transition (CLOSED→OPEN, OPEN→HALF_OPEN, HALF_OPEN→CLOSED,
+  HALF_OPEN→OPEN). Observer-Fehler werden via
+  `contextlib.suppress(Exception)` geschluckt — Observer-Bugs
+  dürfen den Breaker nie umwerfen.
+- **main.py**: MetricsRegistry wird früh gebaut (damit der
+  MetricsMessageSender den Outbound-Counter kriegt), an webhook
+  router + state + Middleware gereicht. Circuit-Observer pipes
+  state-transitions in die Registry.
+
+**Tests-Stand**: 1501/1501 grün (C8.3 Baseline 1470 + 31 neu).
+mypy --strict clean auf 119 source files. ruff clean auf allen
+angefassten Files. Neue Tests:
+- `tests/unit/test_metrics_registry.py` — 21 Tests (counter
+  accumulate/value, gauge set/read, histogram buckets/sum/totals,
+  render format inkl. label-escape + type comments + sort-stability,
+  thread-safety smoke, parametrized label rendering).
+- `tests/unit/test_metrics_wiring.py` — 6 Tests (MetricsMessageSender
+  happy-path + no-count-on-failure + circuit-observer → gauge
+  flip on open/close + observer-exception-safety).
+- `tests/integration/test_metrics_e2e.py` — 5 Tests (signed
+  /webhook → inbound/outbound counters populated + latency
+  histogram series present + content-type text/plain +
+  rejected sender does not bump counter + endpoint empty before
+  traffic).
+
+## Phase 8 — gesamt ✅
+
+Alle vier Checkpoints durch. Phase 8 ist damit inhaltlich
+abgeschlossen (Max-Limit-Persistenz + Diagnose-Commands +
+Circuit-Breaker + Prometheus-Metrics). Wartet auf User-Freigabe
+für **Phase 9 — Docs + Smoke-Tests + Polish**.
 
 ## C8.3 liefert (Live-Verhalten)
 

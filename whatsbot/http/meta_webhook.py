@@ -41,6 +41,7 @@ from whatsbot.config import Environment, Settings
 from whatsbot.domain import whitelist
 from whatsbot.domain.injection import detect_triggers
 from whatsbot.domain.media import SUPPORTED_KINDS, MediaKind, classify_meta_kind
+from whatsbot.http.metrics import MetricsRegistry
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.message_sender import MessageSender
 from whatsbot.ports.secrets_provider import (
@@ -241,6 +242,7 @@ def build_router(
     coordinator: ConfirmationCoordinator | None = None,
     output_service: OutputService | None = None,
     media_service: MediaService | None = None,
+    metrics_registry: MetricsRegistry | None = None,
 ) -> APIRouter:
     """Construct the ``/webhook`` APIRouter with the dependencies wired in.
 
@@ -333,6 +335,12 @@ def build_router(
                 if not whitelist.is_allowed(msg.sender, allowed):
                     log.warning("sender_not_allowed")
                     continue
+                if metrics_registry is not None:
+                    metrics_registry.increment(
+                        "whatsbot_messages_total",
+                        labels={"direction": "in", "kind": "text"},
+                        help_text="Inbound + outbound message counters",
+                    )
 
                 # Spec §9 injection telegraph detection — audit-only for
                 # now. Phase 4 will actually wrap the text via
@@ -411,6 +419,12 @@ def build_router(
                 if not whitelist.is_allowed(media.sender, allowed):
                     log.warning("sender_not_allowed")
                     continue
+                if metrics_registry is not None:
+                    metrics_registry.increment(
+                        "whatsbot_messages_total",
+                        labels={"direction": "in", "kind": media.kind.value},
+                        help_text="Inbound + outbound message counters",
+                    )
                 # Spec §9 + §20 — voice notes take 2-10 s to
                 # transcribe. Send an immediate ack so the user
                 # knows we received the voice before whisper lands.

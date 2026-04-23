@@ -26,8 +26,15 @@ from whatsbot.adapters.file_log_reader import FileLogReader
 from whatsbot.adapters.file_media_cache import FileMediaCache
 from whatsbot.adapters.keychain_provider import KeychainProvider
 from whatsbot.adapters.meta_media_downloader import MetaMediaDownloader
+from whatsbot.adapters.metrics_sender import MetricsMessageSender
 from whatsbot.adapters.osascript_notifier import OsascriptNotifier
 from whatsbot.adapters.redacting_sender import RedactingMessageSender
+from whatsbot.adapters.resilience import (
+    CircuitState as _CircuitState,
+)
+from whatsbot.adapters.resilience import (
+    set_state_observer as _set_circuit_observer,
+)
 from whatsbot.adapters.sqlite_allow_rule_repository import (
     SqliteAllowRuleRepository,
 )
@@ -95,6 +102,7 @@ from whatsbot.config import Environment, Settings, assert_secrets_present
 from whatsbot.domain import whitelist
 from whatsbot.http.hook_endpoint import build_router as build_hook_router
 from whatsbot.http.meta_webhook import build_router as build_webhook_router
+from whatsbot.http.metrics import MetricsRegistry, ResponseLatencyMiddleware
 from whatsbot.http.middleware import ConstantTimeMiddleware, CorrelationIdMiddleware
 from whatsbot.logging_setup import configure_logging, get_logger
 from whatsbot.ports.audio_converter import AudioConverter
@@ -170,13 +178,35 @@ def create_app(
     else:
         secrets_for_router = _EmptySecretsProvider()
 
+    # Phase 8 C8.4 — MetricsRegistry. One instance per app, stashed
+    # on app.state further down. Built early so the sender wrapper
+    # can increment the outbound counter.
+    metrics_registry = MetricsRegistry()
+
+    # Wire the Phase-8 circuit-breaker state observer into the
+    # registry: every state transition lands as a 0/1 gauge so
+    # Prometheus can ``sum by (state)``.
+    def _observe_circuit(service_name: str, new_state: _CircuitState) -> None:
+        for state in _CircuitState:
+            metrics_registry.set_gauge(
+                "whatsbot_circuit_state",
+                1 if state is new_state else 0,
+                labels={"service": service_name, "state": state.value},
+                help_text="Circuit-breaker state (1=current, 0=inactive)",
+            )
+
+    _set_circuit_observer(_observe_circuit)
+
     raw_sender: MessageSender = (
         message_sender if message_sender is not None else LoggingMessageSender()
     )
     # Every outgoing WhatsApp body routes through the Spec §10 redaction
     # pipeline. The decorator is infallible: if redaction would crash
     # (it can't today, it's pure over strings), we still want delivery.
-    sender: MessageSender = RedactingMessageSender(raw_sender)
+    sender: MessageSender = MetricsMessageSender(
+        inner=RedactingMessageSender(raw_sender),
+        registry=metrics_registry,
+    )
 
     # State DB: open once per process. In test env caller injects an
     # in-memory connection; otherwise we use the real spec-§4 path.
@@ -621,6 +651,9 @@ def create_app(
     # ones so an attacker can't enumerate the sender whitelist via timing.
     app.add_middleware(ConstantTimeMiddleware, min_duration_ms=200, paths=("/webhook",))
     app.add_middleware(CorrelationIdMiddleware)
+    # Outermost middleware wraps the full stack so the latency
+    # histogram records end-to-end time including constant-time padding.
+    app.add_middleware(ResponseLatencyMiddleware, registry=metrics_registry)
 
     app.include_router(
         build_webhook_router(
@@ -631,6 +664,7 @@ def create_app(
             coordinator=coordinator,
             output_service=output_service,
             media_service=media_service,
+            metrics_registry=metrics_registry,
         )
     )
     # Stash the coordinator on the app state so ``create_hook_app``
@@ -646,6 +680,7 @@ def create_app(
     app.state.media_sweeper = sweeper
     app.state.limit_service = limit_service
     app.state.max_limit_sweeper = limit_sweeper
+    app.state.metrics_registry = metrics_registry
 
     # Phase 4 C4.6 + C4.7 — StartupRecovery coerces YOLO → Normal
     # (Spec §6 invariant) and calls ensure_started for every row in
@@ -675,8 +710,11 @@ def create_app(
 
     @app.get("/metrics", tags=["meta"], response_class=PlainTextResponse)
     async def metrics() -> str:
-        # Phase 1 stub. Real Prometheus exposition lands in Phase 8.
-        return ""
+        # Phase 8 C8.4 — real Prometheus exposition. The endpoint
+        # sits on the main app which binds to settings.bind_host
+        # (default 127.0.0.1) — it must *never* be reachable via
+        # the Cloudflare tunnel (Spec §15).
+        return metrics_registry.render()
 
     log.info(
         "startup_complete",
