@@ -42,6 +42,9 @@ from whatsbot.adapters.sqlite_project_repository import SqliteProjectRepository
 from whatsbot.adapters.sqlite_repo import open_state_db
 from whatsbot.adapters.subprocess_git_clone import SubprocessGitClone
 from whatsbot.adapters.tmux_subprocess import SubprocessTmuxController
+from whatsbot.adapters.watchdog_transcript_watcher import (
+    WatchdogTranscriptWatcher,
+)
 from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
 from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.allow_service import AllowService
@@ -52,6 +55,7 @@ from whatsbot.application.hook_service import HookService
 from whatsbot.application.output_service import OutputService
 from whatsbot.application.project_service import ProjectService
 from whatsbot.application.session_service import SessionService
+from whatsbot.application.transcript_ingest import TranscriptIngest
 from whatsbot.config import Environment, Settings, assert_secrets_present
 from whatsbot.domain import whitelist
 from whatsbot.http.hook_endpoint import build_router as build_hook_router
@@ -66,6 +70,7 @@ from whatsbot.ports.secrets_provider import (
     SecretsProvider,
 )
 from whatsbot.ports.tmux_controller import TmuxController
+from whatsbot.ports.transcript_watcher import TranscriptWatcher
 
 _started_at_monotonic: Final[float] = time.monotonic()
 
@@ -79,6 +84,9 @@ def create_app(
     projects_root: Path | None = None,
     tmux_controller: TmuxController | None = None,
     safe_claude_binary: str | None = None,
+    transcript_watcher: TranscriptWatcher | None = None,
+    claude_home: Path | None = None,
+    discovery_timeout_seconds: float | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app. Single entry point for prod, dev and tests."""
     settings = settings if settings is not None else Settings.from_env()
@@ -185,23 +193,60 @@ def create_app(
     else:
         tmux = None
 
+    # Phase 4 C4.2d — transcript-to-WhatsApp pipe.
+    #
+    # The ingest's on_turn_end callback runs on the watchdog observer
+    # thread. It dispatches the assistant text through the output
+    # pipeline (redaction + >10KB dialog) to the default WhatsApp
+    # recipient — Spec §5 whitelist has a single user in MVP, so
+    # ``default_recipient`` above is the right fan-out target.
+    #
+    # If there's no default recipient (no whitelist configured), we
+    # silently drop turn-end callbacks: better than raising on the
+    # watcher thread and killing the observer.
     session_service: SessionService | None = None
     if tmux is not None:
+        watcher = transcript_watcher
+        ingest: TranscriptIngest | None = None
+        if watcher is None and settings.env is not Environment.TEST:
+            watcher = WatchdogTranscriptWatcher()
+        if watcher is not None:
+            session_repo_for_ingest = SqliteClaudeSessionRepository(conn)
+
+            def _deliver_turn_end(project: str, text: str) -> None:
+                del project  # single-user bot: no per-project routing yet
+                if not text:
+                    return
+                if default_recipient is None:
+                    log.warning(
+                        "turn_end_dropped_no_recipient",
+                        text_len=len(text),
+                    )
+                    return
+                output_service.deliver(to=default_recipient, body=text)
+
+            ingest = TranscriptIngest(
+                session_repo=session_repo_for_ingest,
+                on_turn_end=_deliver_turn_end,
+            )
+
+        session_kwargs: dict[str, object] = {
+            "project_repo": project_repo,
+            "session_repo": SqliteClaudeSessionRepository(conn),
+            "tmux": tmux,
+            "projects_root": projects_root,
+        }
         if safe_claude_binary is not None:
-            session_service = SessionService(
-                project_repo=project_repo,
-                session_repo=SqliteClaudeSessionRepository(conn),
-                tmux=tmux,
-                projects_root=projects_root,
-                safe_claude_binary=safe_claude_binary,
-            )
-        else:
-            session_service = SessionService(
-                project_repo=project_repo,
-                session_repo=SqliteClaudeSessionRepository(conn),
-                tmux=tmux,
-                projects_root=projects_root,
-            )
+            session_kwargs["safe_claude_binary"] = safe_claude_binary
+        if watcher is not None:
+            session_kwargs["transcript_watcher"] = watcher
+        if ingest is not None:
+            session_kwargs["transcript_ingest"] = ingest
+        if claude_home is not None:
+            session_kwargs["claude_home"] = claude_home
+        if discovery_timeout_seconds is not None:
+            session_kwargs["discovery_timeout_seconds"] = discovery_timeout_seconds
+        session_service = SessionService(**session_kwargs)  # type: ignore[arg-type]
 
     command_handler = CommandHandler(
         project_service=project_service,
@@ -240,6 +285,9 @@ def create_app(
     app.state.coordinator = coordinator
     app.state.project_repo = project_repo
     app.state.allow_rule_repo = SqliteAllowRuleRepository(conn)
+    # Exposed for tests that need to drive lifecycle ops from outside
+    # the webhook flow (e.g. stop_transcript_watch on teardown).
+    app.state.session_service = session_service
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, object]:
