@@ -1,10 +1,16 @@
 # Aktueller Stand
 
-**Projekt-Status**: **Phase 1-11 komplett ✅ — Bot produktiv.**
-Handy-Ping verifiziert 2026-04-24 15:25 UTC (Phase 10). Phase 11
-fügt `/import <name> <absoluter-pfad>` hinzu: bestehende Ordner lassen
-sich jetzt als Projekte fernsteuern. Offen als Live-Test: C11.6
-(`/import wabot /Users/hagenmarggraf/whatsbot` am echten Bot).
+**Projekt-Status**: **Phase 1-11 Code + Tests komplett ✅.** Bot
+produktiv seit 2026-04-24 15:25 UTC (Phase 10 /ping → Handy). Phase 11
+fügt `/import <name> <absoluter-pfad>` hinzu und ist code-seitig
+vollständig: Migration auf Live-DB gelaufen, Bot läuft mit Phase-11-
+Code (PID 91727 zum Zeitpunkt des letzten Kickstart).
+
+**C11.6 Live-Verifikation vom Handy — ausstehend bei nächster Session.**
+Siehe Abschnitt "Wie für nächste Session weitermachen" unten für die
+4 konkreten Handy-Tests (Import, Listing, Claude im echten Repo, /rm
+non-destructive).
+
 SIM-Port-Lock beim Carrier bleibt User-Action außerhalb Code.
 
 ## Deployment-Stand (Stand 2026-04-23 abend)
@@ -145,17 +151,70 @@ funktioniert.
 
 ## Wie für nächste Session weitermachen
 
-1. Diese Datei lesen — du siehst "Phase 1-10 komplett, Bot
-   produktiv".
-2. `git log --oneline -15` für den Commit-Stand.
-3. `venv/bin/pytest tests/unit/ tests/integration/ tests/smoke.py
-   --ignore=tests/unit/test_hook_common.py
+1. Diese Datei lesen — Stand ist "Phase 1-11 Code fertig,
+   C11.6 Handy-Test ausstehend".
+2. `git log --oneline -10` für den Commit-Stand (letzte Commits
+   sind `ed77c1e chore(config): Settings extra=forbid` und davor
+   die fünf `feat(phase-11): C11.x`-Commits).
+3. Test-Baseline: `venv/bin/pytest tests/unit/ tests/integration/
+   tests/smoke.py --ignore=tests/unit/test_hook_common.py
    --ignore=tests/integration/test_hook_script.py
    --ignore=tests/integration/test_hook_fail_closed.py` sollte
-   **1572/1572 grün** + 1 live-skipped zeigen. mypy --strict
-   clean, ruff clean.
-4. Offene Follow-ups siehe unten ("Bekannte Follow-ups,
-   nicht-blockierend"). Keiner davon zwingend.
+   **1631 passed + 1 live-skipped** zeigen. mypy --strict clean
+   auf 120 source files, ruff clean.
+4. Bot-Zustand prüfen: `launchctl print gui/$UID/com.local.whatsbot
+   | grep -E "state|pid"` zeigt running. `curl -s
+   http://127.0.0.1:8000/health` liefert 200.
+
+### C11.6 — Live-Verifikation (vom Handy)
+
+Schicke der Reihe nach vom Handy:
+
+```
+/import wabot /Users/hagenmarggraf/whatsbot
+```
+
+Erwartung: ✅-Reply mit Pfad, Rule-Vorschläge + Liste Neu-angelegt.
+
+```
+/ls
+```
+
+Erwartung: `wabot (imported) → /Users/hagenmarggraf/whatsbot`.
+
+```
+/p wabot zeig mir die letzten 3 Commits
+```
+
+Erwartung: Claude startet im echten Repo, `git log --oneline -3`
+liefert Phase-11-Commits + Settings-Hardening.
+
+```
+/rm wabot
+/rm wabot <panic-PIN>
+```
+
+Erwartung: `🗑 'wabot' entregistriert (Ordner unberührt).` Der
+Repo-Ordner bleibt auf der Platte, nur die DB-Row geht.
+
+Wenn alles grün ist, Abschluss-Commit:
+`chore(phase-11): C11.6 live verified`. Danach ist Phase 11
+vollständig abgeschlossen.
+
+### Bekannte Post-Phase-11-Hygienepunkte
+
+- **claude_sessions.session_id UNIQUE Impl-Debt**: seit Phase 4
+  bekannt, bisher nicht-blockierend. Zwei frische Sessions mit
+  leerer session_id kollidieren — heute beim Bot-Restart zum
+  ersten Mal sichtbar in `launchd-stderr.log`
+  (UNIQUE-constraint-Error aus `sqlite_claude_session_repository`).
+  Fix: Schema auf NULL statt empty normalisieren oder UNIQUE
+  droppen. Nächste Mini-Phase-Kandidat.
+- **tests/integration/** leckten in die Live-DB bis Phase-11-C11.5
+  (Pydantic ignorierte falsche Settings-Feldnamen silently).
+  Gefixt via `ConfigDict(extra="forbid")` in `whatsbot/config.py`.
+  Jeder zukünftige Test mit Typo im Settings-Feldnamen raised
+  jetzt sofort.
 
 ## Bekannte Follow-ups, nicht-blockierend
 
