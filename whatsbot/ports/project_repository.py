@@ -8,6 +8,7 @@ fake by wrapping the same SQLite adapter against ``:memory:``.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 
 from whatsbot.domain.projects import Mode, Project
@@ -39,6 +40,13 @@ class ProjectRepository(Protocol):
         """Remove the project row. Raises ``ProjectNotFoundError`` if absent."""
 
     def exists(self, name: str) -> bool: ...
+
+    def exists_with_path(self, path: Path) -> bool:
+        """Return True if some project row already points at ``path``.
+
+        Used by ``/import`` to reject double-registration of the same
+        directory under different names.
+        """
 
     def update_mode(self, name: str, mode: Mode) -> None:
         """Change only the ``mode`` column. Used by ``/mode`` switches

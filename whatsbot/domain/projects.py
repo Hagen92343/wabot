@@ -1,12 +1,16 @@
 """Project domain model — pure, no I/O.
 
-A *project* in whatsbot is a working directory under ``~/projekte/<name>/``
-that maps 1:1 to a tmux session, a Claude Code session, and a per-project
-mode (normal / strict / yolo). Spec §6 + §11.
+A *project* in whatsbot is a working directory that maps 1:1 to a tmux
+session, a Claude Code session, and a per-project mode (normal / strict
+/ yolo). Spec §6 + §11.
 
-Phase 1 didn't touch this — Phase 2 introduces the model and persistence
-layer. Phase 4 will hook tmux + Claude into it. The fields below mirror
-the ``projects`` table from Spec §19.
+Historically the directory lived under ``~/projekte/<name>/`` always.
+Phase 11 adds ``/import`` — importing existing directories at arbitrary
+paths. ``Project.path`` holds the explicit absolute path; ``None`` means
+"use the default ``projects_root / name``" (Legacy + /new-created).
+
+The fields below mirror the ``projects`` table from Spec §19 after
+migration 001.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 
 
 class Mode(StrEnum):
@@ -26,10 +31,11 @@ class Mode(StrEnum):
 
 
 class SourceMode(StrEnum):
-    """How the project was created."""
+    """How the project entered whatsbot's registry."""
 
     EMPTY = "empty"
     GIT = "git"
+    IMPORTED = "imported"
 
 
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
@@ -83,7 +89,14 @@ def validate_project_name(name: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Project:
-    """Persisted project record. Mirrors the ``projects`` table."""
+    """Persisted project record. Mirrors the ``projects`` table.
+
+    ``path`` is ``None`` for empty/git projects created via ``/new`` —
+    their location is always ``projects_root / name``. For ``/import``
+    projects it holds the explicit absolute path on disk. Call
+    :func:`resolved_path` to always get the concrete Path regardless of
+    storage variant.
+    """
 
     name: str
     source_mode: SourceMode
@@ -92,11 +105,28 @@ class Project:
     last_used_at: datetime | None = None
     default_model: str = "sonnet"
     mode: Mode = Mode.NORMAL
+    path: Path | None = None
 
     def __post_init__(self) -> None:
         # Run validation defensively even when constructed from DB rows so a
         # corrupted row can't sneak past the application layer.
         validate_project_name(self.name)
+        if self.path is not None and not self.path.is_absolute():
+            raise ValueError(
+                f"Project.path must be absolute when set, got {self.path!r}"
+            )
+
+
+def resolved_path(project: Project, projects_root: Path) -> Path:
+    """Return the concrete on-disk path of ``project``.
+
+    Imported projects (``source_mode=IMPORTED``) store an explicit
+    ``path``. Legacy empty/git projects use ``projects_root / name``.
+    Pure function — no filesystem access.
+    """
+    if project.path is not None:
+        return project.path
+    return projects_root / project.name
 
 
 @dataclass(frozen=True, slots=True)

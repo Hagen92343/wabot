@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,7 @@ from whatsbot.domain.projects import (
     ProjectListing,
     SourceMode,
     format_listing,
+    resolved_path,
     validate_project_name,
 )
 
@@ -134,3 +136,59 @@ def test_format_listing_includes_mode_emoji_and_active_marker() -> None:
     assert "🔴" in text  # YOLO emoji
     assert "alpha" in text and "beta" in text
     assert "(empty)" in text and "(git)" in text
+
+
+# --- Project.path + resolved_path (Phase 11) -------------------------------
+
+
+def test_project_accepts_none_path_for_legacy() -> None:
+    p = Project(
+        name="legacy",
+        source_mode=SourceMode.EMPTY,
+        created_at=datetime(2026, 4, 24, tzinfo=UTC),
+    )
+    assert p.path is None
+
+
+def test_project_accepts_absolute_path_for_import() -> None:
+    p = Project(
+        name="wabot",
+        source_mode=SourceMode.IMPORTED,
+        created_at=datetime(2026, 4, 24, tzinfo=UTC),
+        path=Path("/Users/hagenmarggraf/whatsbot"),
+    )
+    assert p.path == Path("/Users/hagenmarggraf/whatsbot")
+
+
+def test_project_rejects_relative_path() -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        Project(
+            name="bad",
+            source_mode=SourceMode.IMPORTED,
+            created_at=datetime(2026, 4, 24, tzinfo=UTC),
+            path=Path("relative/path"),
+        )
+
+
+def test_source_mode_has_imported_value() -> None:
+    assert SourceMode.IMPORTED.value == "imported"
+    assert SourceMode("imported") is SourceMode.IMPORTED
+
+
+def test_resolved_path_returns_explicit_path_when_set(tmp_path: Path) -> None:
+    p = Project(
+        name="wabot",
+        source_mode=SourceMode.IMPORTED,
+        created_at=datetime(2026, 4, 24, tzinfo=UTC),
+        path=tmp_path / "elsewhere",
+    )
+    assert resolved_path(p, projects_root=Path("/home/x/projekte")) == tmp_path / "elsewhere"
+
+
+def test_resolved_path_falls_back_to_projects_root(tmp_path: Path) -> None:
+    p = Project(
+        name="scratch",
+        source_mode=SourceMode.EMPTY,
+        created_at=datetime(2026, 4, 24, tzinfo=UTC),
+    )
+    assert resolved_path(p, projects_root=tmp_path) == tmp_path / "scratch"

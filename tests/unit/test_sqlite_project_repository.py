@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -134,3 +135,78 @@ def test_invalid_source_mode_rejected_by_check(conn: sqlite3.Connection) -> None
             "VALUES (?, 'banana', '2026-01-01')",
             ("p",),
         )
+
+
+# --- path column (Phase 11) ------------------------------------------------
+
+
+def test_create_persists_path_for_imported(
+    repo: SqliteProjectRepository, conn: sqlite3.Connection
+) -> None:
+    project = Project(
+        name="wabot",
+        source_mode=SourceMode.IMPORTED,
+        created_at=datetime(2026, 4, 24, tzinfo=UTC),
+        path=Path("/Users/hagenmarggraf/whatsbot"),
+    )
+    repo.create(project)
+    row = conn.execute(
+        "SELECT path, source_mode FROM projects WHERE name = 'wabot'"
+    ).fetchone()
+    assert row["path"] == "/Users/hagenmarggraf/whatsbot"
+    assert row["source_mode"] == "imported"
+
+
+def test_create_without_path_stores_null(
+    repo: SqliteProjectRepository, conn: sqlite3.Connection
+) -> None:
+    repo.create(_project("legacy"))
+    row = conn.execute(
+        "SELECT path FROM projects WHERE name = 'legacy'"
+    ).fetchone()
+    assert row["path"] is None
+
+
+def test_get_returns_imported_project_with_path(
+    repo: SqliteProjectRepository,
+) -> None:
+    repo.create(
+        Project(
+            name="wabot",
+            source_mode=SourceMode.IMPORTED,
+            created_at=datetime(2026, 4, 24, tzinfo=UTC),
+            path=Path("/Users/hagenmarggraf/whatsbot"),
+        )
+    )
+    fetched = repo.get("wabot")
+    assert fetched.path == Path("/Users/hagenmarggraf/whatsbot")
+    assert fetched.source_mode is SourceMode.IMPORTED
+
+
+def test_exists_with_path_true_when_registered(
+    repo: SqliteProjectRepository,
+) -> None:
+    path = Path("/opt/some/existing/project")
+    repo.create(
+        Project(
+            name="other",
+            source_mode=SourceMode.IMPORTED,
+            created_at=datetime(2026, 4, 24, tzinfo=UTC),
+            path=path,
+        )
+    )
+    assert repo.exists_with_path(path) is True
+
+
+def test_exists_with_path_false_when_unknown(
+    repo: SqliteProjectRepository,
+) -> None:
+    assert repo.exists_with_path(Path("/never/seen/this/path")) is False
+
+
+def test_exists_with_path_false_for_legacy_without_path(
+    repo: SqliteProjectRepository,
+) -> None:
+    # Legacy empty project has path=NULL, should never match any query.
+    repo.create(_project("legacy"))
+    assert repo.exists_with_path(Path("/tmp/whatever")) is False
