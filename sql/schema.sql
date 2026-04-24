@@ -7,13 +7,16 @@
 
 CREATE TABLE projects (
     name TEXT PRIMARY KEY,
-    source_mode TEXT NOT NULL CHECK(source_mode IN ('empty', 'git')),
+    source_mode TEXT NOT NULL CHECK(source_mode IN ('empty', 'git', 'imported')),
     source TEXT,
     created_at TEXT NOT NULL,
     last_used_at TEXT,
     default_model TEXT DEFAULT 'sonnet',
-    mode TEXT DEFAULT 'normal' CHECK(mode IN ('normal', 'strict', 'yolo'))
+    mode TEXT DEFAULT 'normal' CHECK(mode IN ('normal', 'strict', 'yolo')),
+    path TEXT
 );
+-- path: absoluter Projekt-Pfad. NULL ⇒ implicit ~/projekte/<name> (Legacy).
+-- source_mode 'imported' ⇒ Projekt wurde via /import angehängt (Phase 11).
 
 CREATE TABLE claude_sessions (
     project_name TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,
