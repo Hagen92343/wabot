@@ -54,6 +54,86 @@ class GitCreationOutcome:
     detection: DetectionResult
 
 
+@dataclass(frozen=True, slots=True)
+class ImportOutcome:
+    """Result of ``import_existing``.
+
+    Reports the persisted project row, smart-detection output, and two
+    bookkeeping lists so the command handler can phrase the WhatsApp
+    reply precisely:
+
+    * ``artifacts_created`` — names of files the bot dropped into the
+      imported directory (e.g. ``CLAUDE.md``, ``.claudeignore``,
+      ``.whatsbot/config.json``).
+    * ``artifacts_preserved`` — names of files the bot found already
+      present and refused to overwrite.
+    * ``warnings`` — non-fatal hints, e.g. path under a TCC-protected
+      macOS directory.
+    """
+
+    project: Project
+    detection: DetectionResult
+    artifacts_created: list[str]
+    artifacts_preserved: list[str]
+    warnings: list[str]
+
+
+class InvalidImportPathError(ValueError):
+    """Raised when ``/import`` is given a path we can't accept."""
+
+
+# Paths we refuse to import regardless of what the user claims. These
+# are either sensitive secret stores or system directories where Claude
+# running arbitrary Bash would be catastrophic.
+#
+# Note: macOS symlinks /etc → /private/etc, /var → /private/var, etc.
+# We do NOT include /private here because /private/tmp and
+# /private/var/folders (user cache / pytest tmp_path) must remain
+# importable for tests. System-critical paths under /private
+# (/private/etc, /private/var/…) get matched via their resolved form
+# below.
+_PROTECTED_ROOTS: tuple[Path, ...] = (
+    Path.home() / "Library",
+    Path.home() / ".ssh",
+    Path.home() / ".aws",
+    Path.home() / ".gnupg",
+    Path.home() / ".config" / "gh",
+    Path.home() / ".1password",
+    Path("/etc"),
+    Path("/System"),
+    Path("/Library"),
+    Path("/usr"),
+    Path("/bin"),
+    Path("/sbin"),
+)
+
+# Paths where macOS TCC (iCloud / sandbox guards) will often block the
+# bot's writes even when the logic says allow. We don't refuse — the
+# user knows their own setup — but we warn so a `git push` that silently
+# doesn't actually push isn't a mystery later.
+_TCC_WARN_ROOTS: tuple[Path, ...] = (
+    Path.home() / "Desktop",
+    Path.home() / "Documents",
+    Path.home() / "Downloads",
+    Path.home() / "Pictures",
+    Path.home() / "Movies",
+    Path.home() / "Music",
+)
+
+
+def _is_under_root(path: Path, root: Path) -> bool:
+    """Return True if ``path`` is inside ``root`` (or equals it).
+
+    Both sides get ``.resolve()`` first so symlink-equivalent paths
+    (e.g. /etc and /private/etc on macOS) match correctly.
+    """
+    try:
+        path.resolve().relative_to(root.resolve() if root.exists() else root)
+    except ValueError:
+        return False
+    return True
+
+
 class ProjectService:
     """High-level operations on the project collection."""
 
@@ -184,6 +264,142 @@ class ProjectService:
             path=str(path),
         )
         return GitCreationOutcome(project=project, detection=detection)
+
+    # ---- import existing --------------------------------------------------
+
+    def import_existing(self, raw_name: str, raw_path: str) -> ImportOutcome:
+        """Register an already-existing directory as a whatsbot project.
+
+        Unlike ``create_empty`` / ``create_from_git``, we don't own the
+        filesystem here — the user points us at their bestehender Ordner.
+        Steps:
+
+        1. Validate name + path (absolute, exists, not in protected roots,
+           not already registered by name or path).
+        2. Idempotently drop in missing bot-managed dotfiles. Existing
+           user files are never overwritten.
+        3. Run smart-detection + write ``suggested-rules.json``.
+        4. Persist the DB row with ``source_mode=IMPORTED`` and the
+           explicit path.
+
+        Failure modes:
+            - ``InvalidProjectNameError`` — bad name
+            - ``InvalidImportPathError`` — bad / protected / duplicate path
+            - ``ProjectAlreadyExistsError`` — name already used
+            - ``ProjectFilesystemError`` — can't write artifacts
+        """
+        name = validate_project_name(raw_name)
+
+        # Path shape.
+        try:
+            path = Path(raw_path).expanduser()
+        except (TypeError, ValueError) as exc:
+            raise InvalidImportPathError(f"Pfad '{raw_path}' ist kein gueltiger Pfad.") from exc
+        if not path.is_absolute():
+            raise InvalidImportPathError(
+                f"Pfad muss absolut sein (mit / anfangen), bekam '{raw_path}'."
+            )
+        if not path.exists():
+            raise InvalidImportPathError(f"Pfad '{path}' existiert nicht.")
+        if not path.is_dir():
+            raise InvalidImportPathError(f"Pfad '{path}' ist kein Verzeichnis.")
+
+        # Normalise (resolve symlinks / relative components) so we register
+        # a canonical path.
+        path = path.resolve()
+
+        # Protected-root check.
+        for root in _PROTECTED_ROOTS:
+            if _is_under_root(path, root):
+                raise InvalidImportPathError(
+                    f"Pfad '{path}' liegt in einem geschuetzten Bereich "
+                    f"({root}); Import abgelehnt."
+                )
+
+        # Duplicate checks.
+        if self._repo.exists(name):
+            raise ProjectAlreadyExistsError(f"Projekt '{name}' existiert schon.")
+        if self._repo.exists_with_path(path):
+            raise InvalidImportPathError(
+                f"Pfad '{path}' ist schon unter einem anderen Namen registriert."
+            )
+
+        warnings: list[str] = []
+        for warn_root in _TCC_WARN_ROOTS:
+            if _is_under_root(path, warn_root):
+                warnings.append(
+                    f"Pfad liegt unter {warn_root.name}/ — macOS TCC kann "
+                    f"Schreibzugriffe blockieren. Siehe docs/OPERATING.md."
+                )
+                break
+
+        # Artefakte — idempotent, niemals ueberschreiben was der User hat.
+        artifacts_created: list[str] = []
+        artifacts_preserved: list[str] = []
+        try:
+            (path / ".whatsbot").mkdir(exist_ok=True)
+            (path / ".whatsbot" / "outputs").mkdir(exist_ok=True)
+
+            ignore_written = post_clone.write_claudeignore_if_missing(path)
+            if ignore_written is None:
+                artifacts_preserved.append(".claudeignore")
+            else:
+                artifacts_created.append(".claudeignore")
+
+            config_written = post_clone.write_config_json_if_missing(
+                path,
+                project_name=name,
+                source_url=str(path),
+                source_mode=SourceMode.IMPORTED.value,
+            )
+            if config_written is None:
+                artifacts_preserved.append(".whatsbot/config.json")
+            else:
+                artifacts_created.append(".whatsbot/config.json")
+
+            claude_md_written = post_clone.write_claude_md_if_missing(
+                path, project_name=name
+            )
+            if claude_md_written is None:
+                artifacts_preserved.append("CLAUDE.md")
+            else:
+                artifacts_created.append("CLAUDE.md")
+
+            detection = detect(path)
+            rules_written = post_clone.write_suggested_rules(path, detection)
+            if rules_written is not None:
+                artifacts_created.append(".whatsbot/suggested-rules.json")
+        except OSError as exc:
+            raise ProjectFilesystemError(
+                f"Konnte Import-Artefakte in {path} nicht anlegen: {exc}"
+            ) from exc
+
+        project = Project(
+            name=name,
+            source_mode=SourceMode.IMPORTED,
+            source=str(path),
+            created_at=datetime.now(UTC),
+            mode=Mode.NORMAL,
+            path=path,
+        )
+        self._repo.create(project)
+
+        self._log.info(
+            "project_imported",
+            name=name,
+            path=str(path),
+            artifacts_created=artifacts_created,
+            artifacts_preserved=artifacts_preserved,
+            suggested_rules=len(detection.suggested_rules),
+            warnings=warnings,
+        )
+        return ImportOutcome(
+            project=project,
+            detection=detection,
+            artifacts_created=artifacts_created,
+            artifacts_preserved=artifacts_preserved,
+            warnings=warnings,
+        )
 
     # ---- read -------------------------------------------------------------
 

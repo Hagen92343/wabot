@@ -28,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 
 from whatsbot.domain.pending_deletes import PendingDelete, compute_deadline
-from whatsbot.domain.projects import validate_project_name
+from whatsbot.domain.projects import SourceMode, validate_project_name
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.app_state_repository import (
     KEY_ACTIVE_PROJECT,
@@ -70,10 +70,17 @@ class PanicPinNotConfiguredError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class DeleteOutcome:
-    """Result of a successful ``confirm_delete``."""
+    """Result of a successful ``confirm_delete``.
+
+    ``trashed_to`` is ``None`` for imported projects — their directory
+    stays untouched on ``/rm`` because we didn't create it, so we don't
+    get to delete it. Only the DB row goes. For legacy empty/git
+    projects ``trashed_to`` is the Trash destination path.
+    """
 
     project_name: str
-    trashed_to: Path
+    trashed_to: Path | None
+    source_mode: SourceMode
 
 
 class DeleteService:
@@ -147,7 +154,15 @@ class DeleteService:
 
         self._verify_pin(pin)
 
-        trashed_to = self._move_to_trash(name)
+        # Imported projects: never touch the filesystem. The user pointed
+        # the bot at their existing working directory; our /rm just
+        # un-registers the project. Legacy empty/git projects live under
+        # projects_root and do get moved to Trash.
+        project = self._projects.get(name)
+        if project.source_mode is SourceMode.IMPORTED:
+            trashed_to: Path | None = None
+        else:
+            trashed_to = self._move_to_trash(name)
         # CASCADE in the schema wipes allow_rules / claude_sessions /
         # session_locks automatically when the projects row goes.
         self._projects.delete(name)
@@ -158,9 +173,14 @@ class DeleteService:
         self._log.info(
             "delete_confirmed",
             project=name,
-            trashed_to=str(trashed_to),
+            source_mode=project.source_mode.value,
+            trashed_to=str(trashed_to) if trashed_to is not None else None,
         )
-        return DeleteOutcome(project_name=name, trashed_to=trashed_to)
+        return DeleteOutcome(
+            project_name=name,
+            trashed_to=trashed_to,
+            source_mode=project.source_mode,
+        )
 
     # ---- sweeper ----------------------------------------------------------
 

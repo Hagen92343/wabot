@@ -81,6 +81,43 @@ def write_claudeignore(project_dir: Path) -> Path:
     return target
 
 
+def write_claudeignore_if_missing(project_dir: Path) -> Path | None:
+    """Write ``.claudeignore`` only if the project doesn't have one.
+
+    Used by ``/import`` so we don't clobber a hand-tuned ignore list that
+    the user might already have in their bestehender Ordner.
+    """
+    target = project_dir / ".claudeignore"
+    if target.exists():
+        return None
+    target.write_text(CLAUDEIGNORE_TEMPLATE, encoding="utf-8")
+    return target
+
+
+def write_config_json_if_missing(
+    project_dir: Path,
+    *,
+    project_name: str,
+    source_url: str | None,
+    source_mode: str,
+) -> Path | None:
+    """Write ``.whatsbot/config.json`` only if missing (idempotent import)."""
+    whatsbot_dir = project_dir / ".whatsbot"
+    whatsbot_dir.mkdir(exist_ok=True)
+    target = whatsbot_dir / "config.json"
+    if target.exists():
+        return None
+    config = {
+        "name": project_name,
+        "source_mode": source_mode,
+        "source_url": source_url,
+        "created_at": datetime.now(UTC).isoformat(),
+        "schema_version": 1,
+    }
+    target.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return target
+
+
 def write_config_json(
     project_dir: Path,
     *,

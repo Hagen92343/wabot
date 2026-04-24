@@ -37,7 +37,7 @@ from whatsbot.domain.hook_decisions import (
     evaluate_bash,
 )
 from whatsbot.domain.path_rules import evaluate_write
-from whatsbot.domain.projects import Mode
+from whatsbot.domain.projects import Mode, resolved_path
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.allow_rule_repository import AllowRuleRepository
 from whatsbot.ports.project_repository import (
@@ -175,11 +175,17 @@ class HookService:
         )
 
     def _resolve_project_cwd(self, project: str | None) -> Path | None:
-        """Compute ``<projects_root>/<project>`` or ``None`` if we
-        don't have enough context. Pure path math — the directory
-        doesn't have to exist on disk for the is-relative-to check."""
+        """Compute the on-disk cwd for ``project`` or ``None`` if we
+        don't have enough context. Honours imported projects' explicit
+        ``path`` via the DB row — pure path math, no filesystem access."""
         if project is None or self._projects_root is None:
             return None
+        if self._projects is not None:
+            try:
+                return resolved_path(self._projects.get(project), self._projects_root)
+            except ProjectNotFoundError:
+                # Unknown project name → fall back to default mapping.
+                pass
         return self._projects_root / project
 
     # ---- helpers ----------------------------------------------------

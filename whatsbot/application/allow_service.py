@@ -25,6 +25,7 @@ from whatsbot.domain.allow_rules import (
     InvalidAllowRuleError,
     parse_pattern,
 )
+from whatsbot.domain.projects import resolved_path
 from whatsbot.logging_setup import get_logger
 from whatsbot.ports.allow_rule_repository import (
     AllowRuleRepository,
@@ -172,7 +173,14 @@ class AllowService:
             raise ProjectNotFoundError(f"Projekt '{project_name}' nicht gefunden.")
 
     def _suggestions_path(self, project_name: str) -> Path:
-        return self._projects_root / project_name / ".whatsbot" / "suggested-rules.json"
+        return self._project_path(project_name) / ".whatsbot" / "suggested-rules.json"
+
+    def _project_path(self, project_name: str) -> Path:
+        """Resolve a project's on-disk path, honouring imported projects."""
+        try:
+            return resolved_path(self._projects.get(project_name), self._projects_root)
+        except ProjectNotFoundError:
+            return self._projects_root / project_name
 
     def _iter_suggestions(self, project_name: str) -> list[SuggestedRule]:
         path = self._suggestions_path(project_name)
@@ -209,5 +217,5 @@ class AllowService:
     def _sync_settings(self, project_name: str) -> None:
         rules = self._rules.list_for_project(project_name)
         patterns = [r.pattern for r in rules]
-        project_dir = self._projects_root / project_name
+        project_dir = self._project_path(project_name)
         settings_writer.write_allow_rules(project_dir, patterns)

@@ -44,7 +44,7 @@ from whatsbot.domain.injection import sanitize
 from whatsbot.domain.launch import build_claude_argv, render_command_line
 from whatsbot.domain.locks import LockOwner, lock_owner_badge
 from whatsbot.domain.modes import mode_badge, status_bar_color
-from whatsbot.domain.projects import Mode
+from whatsbot.domain.projects import Mode, resolved_path
 from whatsbot.domain.sessions import ClaudeSession, tmux_session_name
 from whatsbot.domain.transcript import BOT_PREFIX
 from whatsbot.logging_setup import get_logger
@@ -119,7 +119,9 @@ class SessionService:
         project = self._projects.get(project_name)
         existing = self._sessions.get(project_name)
         tmux_name = tmux_session_name(project_name)
-        project_path = self._projects_root / project_name
+        # Imported projects carry their explicit path; legacy empty/git
+        # projects fall back to projects_root/name (Phase 11 invariant).
+        project_path = resolved_path(project, self._projects_root)
 
         tmux_alive = self._tmux.has_session(tmux_name)
         # Capture the launch checkpoint BEFORE we touch tmux so fresh-
@@ -335,7 +337,8 @@ class SessionService:
         if session is None:
             return  # defensive — shouldn't happen, ensure_started just wrote it
 
-        project_cwd = self._projects_root / project_name
+        project = self._projects.get(project_name)
+        project_cwd = resolved_path(project, self._projects_root)
         if session.session_id:
             # Resume path: we know the exact filename.
             transcript_path = expected_transcript_path(

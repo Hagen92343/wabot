@@ -667,13 +667,18 @@ class CommandHandler:
         except PanicPinNotConfiguredError as exc:
             self._log.error("panic_pin_missing", error=str(exc))
             return CommandResult(reply=f"⚠️ {exc}", command="/rm")
-        return CommandResult(
-            reply=(
+        if outcome.trashed_to is None:
+            # Imported project: we didn't create the dir, so we don't delete it.
+            reply = (
+                f"🗑 '{outcome.project_name}' entregistriert "
+                f"(Ordner unberührt)."
+            )
+        else:
+            reply = (
                 f"🗑 '{outcome.project_name}' gelöscht "
                 f"(verschoben nach {outcome.trashed_to})."
-            ),
-            command="/rm",
-        )
+            )
+        return CommandResult(reply=reply, command="/rm")
 
     # ---- /mode [normal|strict|yolo] --------------------------------------
 
