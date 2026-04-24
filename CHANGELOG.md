@@ -5,7 +5,7 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
-### Phase 10 — WhatsAppCloudSender (C10.1-C10.4 complete, C10.5 live) 📬
+### Phase 10 — WhatsAppCloudSender (complete) ✅
 
 Mini-Phase, aufgedeckt im Live-Deployment nach Phase 9:
 `WhatsAppCloudSender.send_text` war seit Phase 1 ein Skelett mit
@@ -92,16 +92,32 @@ clean auf 7 angefassten/neuen Files (`message_sender.py`,
 `whatsapp_sender.py`, `main.py`, 4 Test-Files). ruff clean auf
 denselben.
 
-**C10.5 blocked on Meta 401** — Live-Test vom Handy (Bot-Kickstart
-+ `/ping`) bestätigt: Adapter sendet echte HTTP-POSTs an
-`graph.facebook.com/v23.0/1130442710144663/messages`, aber Meta
-lehnt jeden Call mit HTTP 401 Unauthorized ab. Circuit-Breaker
-trippt wie designed nach 5 Failures. Keychain-Werte vorhanden,
-Token fängt mit `EAANWD147E…` an. Debug-Weg dokumentiert in
-`.claude/rules/current-phase.md` ("C10.5 Live-Debug-Stand" +
-"Nächster Schritt morgen") — zwei Curl-Tests gegen `/me` und die
-Phone-Number-ID, dann ggf. Permanent System-User-Token
-regenerieren.
+#### C10.5 — Live Re-Deployment + Handy-Test ✅
+
+- **Root-Cause des 401-Blockers (2026-04-24 morning)**: vorheriger
+  Token war ein Temporary 24h-Token aus der Meta-Dashboard-"API
+  Setup"-Seite, keinen Permanent System-User-Token. Meta antwortete
+  `OAuthException code=190, error_subcode=463, "Session has expired
+  on Thursday, 23-Apr-26 13:00:00 PDT"` — exakt 24 h nach Generierung.
+- **Fix**: Permanent Token via Meta Business Suite → System Users →
+  `whatsbot` → Generate New Token (Expiration: Never,
+  Permissions: `whatsapp_business_messaging` +
+  `whatsapp_business_management`). Token-Länge 206 Zeichen (typisch
+  für System-User-Tokens).
+- **Verifikation**: `GET /v23.0/1130442710144663` liefert
+  `verified_name: "Test Number"`, `display_phone_number: +1
+  555-633-0519`, `webhook_configuration.application:
+  https://bot.lhconsulting.services/webhook`,
+  `platform_type: CLOUD_API`.
+- **Handy-Test 2026-04-24 15:25 UTC**: vom Handy `/ping` →
+  `app.jsonl` zeigt `command_routed` → `HTTP POST
+  v23.0/.../messages 200 OK` → `outbound_message_sent to_tail4=8519
+  body_len=26 message_id=wamid.HBgMNDkx...HFAA==`. Reply `pong ·
+  v0.1.0 · uptime Xs` kam auf dem Handy an.
+- **Bot-Restart** via `launchctl kickstart -k
+  gui/$UID/com.local.whatsbot` hat auch den nach 401-Serie
+  ausgelösten `meta_send`-Circuit-Breaker zurückgesetzt (Registry
+  ist module-level, überlebt Restart nicht — gewollt).
 
 ### Phase 9 — Docs + Smoke-Tests + Polish (complete) ✅
 

@@ -1,8 +1,9 @@
 # Aktueller Stand
 
-**Projekt-Status**: **Phase 1-9 komplett ✅ · Phase 10 C10.1–C10.4
-komplett ✅, C10.5 offen (User-Action).** Build-Phase zu Ende,
-Outbound-Loch geschlossen, warte auf Live-Re-Test vom Handy.
+**Projekt-Status**: **Phase 1-10 komplett ✅ — Bot produktiv.**
+Handy-Ping kommt durch, Claude-Antwort kommt aufs Handy, End-to-End
+verifiziert 2026-04-24 15:25 UTC. Offen ist nur noch Schritt 10
+(SIM-Port-Lock beim Carrier, User-Action außerhalb Code).
 
 ## Deployment-Stand (Stand 2026-04-23 abend)
 
@@ -37,13 +38,15 @@ Abgeschlossen:
   `pong · v0.1.0 · uptime 105s` wurde generiert (siehe
   `app.jsonl` um 2026-04-23T21:05:44Z).
 
-Offen:
+- ✅ **Schritt 11 (Outbound-Seite · C10.5)** — Live-Re-Deploy
+  2026-04-24 15:25 UTC mit Permanent-System-User-Token. Bot kickstarted,
+  vom Handy `/ping` → `outbound_message_sent message_id=wamid.HBgMNDkx...HFAA==`,
+  Reply `pong` kam zurück. Circuit-Breaker griff vorher wie designed
+  (5 × 401 → OPEN), wurde durch Bot-Restart zurückgesetzt.
+
+Offen (User-Action, außerhalb Code-Scope):
 - ⏭ **Schritt 10** — SIM-Port-Lock beim Carrier aktivieren
-  (Spec §24, gegen SIM-Swap). User-Action, Spec-Pflicht vor
-  Produktiv-Betrieb.
-- ⏭ **Schritt 11 (Outbound-Seite · C10.5)** — Code ist fertig
-  (Phase 10 C10.1-C10.4), Re-Deploy + Handy-Verifikation steht
-  aus. Anleitung unten.
+  (Spec §24, gegen SIM-Swap). Spec-Pflicht vor Produktiv-Betrieb.
 
 ## Phase 10 — WhatsAppCloudSender (C10.1-C10.4 done)
 
@@ -94,196 +97,91 @@ Handy-Sicht schweigt der Bot.
 1542 + 30 neue Phase-10-Tests − 1 live-skip). mypy --strict clean
 auf allen 7 Phase-10-Files. ruff clean.
 
-## C10.5 — Live-Re-Deployment + Handy-Test (User-Action)
+## C10.5 — Live verified (2026-04-24 15:25 UTC) ✅
 
-**Vorgehen am Mac**:
+**Root-Cause des vorherigen 401-Blockers**: Der Token, der am
+2026-04-23 abend gesetzt wurde, war ein Temporary 24h-Token aus
+der Meta-Dashboard-"API Setup"-Seite, kein Permanent System-
+User-Token. Meta antwortete nach genau 24 h mit
+`OAuthException code=190, error_subcode=463, "Session has expired
+on Thursday, 23-Apr-26 13:00:00 PDT"`.
 
-1. Commit anstoßen (Claude fragt nach, wenn Du "commit" sagst —
-   ich mache den Sammel-Commit `feat(phase-10): outbound via
-   WhatsApp Cloud API`).
-2. `launchctl kickstart -k gui/$UID/com.local.whatsbot` — Bot neu
-   starten, damit `main.py` die neue Sender-Selection liest.
-3. `tail -f ~/Library/Logs/whatsbot/app.jsonl | grep -E
-   "outbound_|command_routed"` — Live-Log im Auge behalten.
-4. **Vom Handy `/ping` schicken.**
-5. Erwartung am Handy: `pong · v0.1.0 · uptime Xs ━━━ [project]
-   🟢` innerhalb weniger Sekunden.
-6. Erwartung im Log: Eintrag
-   `outbound_message_sent to_tail4=... body_len=... message_id=wamid.*`.
-7. Bei Fehler: `/errors` vom Handy zeigt die letzten Events;
-   `app.jsonl` greppen auf `outbound_message_failed` + `status_code`.
+**Fix-Pfad heute**:
+1. Zwei Debug-Curls gegen `/v23.0/me` + `/v23.0/1130442710144663`
+   → beide mit `code=190, subcode=463, Session has expired` → Token
+   eindeutig abgelaufen.
+2. Neuer Permanent-Token via Meta Business Suite → **Nutzer → Systemnutzer**
+   → `whatsbot` (ID 61564726272665, Admin-Zugriff) → **Assets
+   zuweisen** (WhatsApp-App "wibot", Vollzugriff) → **Token
+   generieren** mit Expiration=**Nie**, Permissions
+   `whatsapp_business_messaging` + `whatsapp_business_management`.
+   Token-Länge 206 Zeichen.
+3. Keychain-Update: `security add-generic-password -U -s whatsbot
+   -a meta-access-token -w '<token>'`. zsh-History nachträglich
+   via `sed -i '' '/<token-prefix>/d' ~/.zsh_history` gescrubbt.
+4. Verifikation mit `GET /v23.0/1130442710144663` → liefert
+   `verified_name: "Test Number"`, `display_phone_number: +1
+   555-633-0519`, `webhook_configuration.application:
+   https://bot.lhconsulting.services/webhook`,
+   `platform_type: CLOUD_API` — Token valid + Phone-Number-Asset
+   zugänglich + Webhook korrekt registriert.
+5. Bot-Restart via `launchctl kickstart -k
+   gui/$UID/com.local.whatsbot` (resettet auch den OPEN
+   `meta_send`-Circuit-Breaker, weil die Registry module-level
+   liegt und Restart sie verwirft — gewollte Invariante).
+6. Handy-Test: vom Handy `/ping` geschickt → `app.jsonl` zeigt
+   `command_routed` → `HTTP POST 200 OK` →
+   `outbound_message_sent to_tail4=8519 body_len=26
+   message_id=wamid.HBgMNDkx...HFAA==` → Reply `pong` kam auf
+   dem Handy an. End-to-End verifiziert.
 
-**Optional Live-Meta-Test am Mac** (nicht nötig für Produktiv,
-aber gute Vorab-Verifikation dass Token + Phone-Number-ID
-stimmen):
+**Bonus-Beweis Phase-8**: der Circuit-Breaker trippte während
+der 401-Serie (5 × 401 in <14 s, `circuit_opened service=meta_send
+threshold=5 window_s=60`) und short-circuitete weitere Calls
+ohne HTTP — Phase-8-C8.3-Design hat in freier Wildbahn
+funktioniert.
 
-```bash
-export WHATSBOT_LIVE_META=1
-export WHATSBOT_LIVE_META_TOKEN="$(security find-generic-password -s whatsbot -a meta-access-token -w)"
-export WHATSBOT_LIVE_META_PHONE_NUMBER_ID="$(security find-generic-password -s whatsbot -a meta-phone-number-id -w)"
-export WHATSBOT_LIVE_META_TO="491716598519"   # Deine Handy-Nummer, keine Plus
-venv/bin/pytest tests/integration/test_whatsapp_sender_live.py -v -s
-```
+## Wie für nächste Session weitermachen
 
-Wenn der Test grün läuft, landet gleich eine
-`whatsbot phase-10 live test · <timestamp>`-Nachricht am Handy.
-
-## Abbruch-Kriterien während C10.5
-
-- **Handy bekommt nix, Log zeigt kein `outbound_message_sent`**:
-  Ist der Bot überhaupt neu gestartet? `launchctl print
-  gui/$UID/com.local.whatsbot | grep -i state` prüfen, PID
-  vergleichen mit `ps -ax | grep whatsbot`.
-- **`outbound_message_failed status_code=401`**: Access-Token
-  abgelaufen oder falsch. Siehe `docs/RUNBOOK.md` §Secret-Rotation,
-  neues Token generieren via System User in Meta-App.
-- **`status_code=400` mit Meta-Fehlerbody**: Body-Shape stimmt
-  nicht — Log-Inhalt prüfen, evtl. Meta-Docs gegenchecken für
-  v23.0-Änderungen. Phase-10-Rules haben das als Abbruch-
-  Kriterium.
-- **`CircuitOpenError` im Log**: entweder 5 aufeinanderfolgende
-  Fehler gegen Meta (Tunnel-Problem? Netzwerk?), oder der Breaker
-  hing noch aus einer vorigen Session. Bot neu starten = Registry
-  reset. Realistisch: 5 aufeinanderfolgende Failures brauchen
-  aktiven Grund — Root-Cause identifizieren bevor retry.
-
-## C10.5 Live-Debug-Stand (Stand 2026-04-24 07:48)
-
-**Was Live-Test gezeigt hat** (Bot-Kickstart + `/ping` vom Handy):
-
-- ✅ **Adapter sendet echte HTTP-Calls** an Meta Graph:
-  `POST https://graph.facebook.com/v23.0/1130442710144663/messages`.
-  C10.1-Implementation ist korrekt, der Bot ist End-to-End auf
-  die neue Sender-Selection umgeschaltet.
-- ❌ **Meta lehnt jeden Call mit HTTP 401 Unauthorized ab.** Vier
-  `/ping`-Attempts in ~14s, alle vier mit `outbound_message_failed
-  status_code=401` im `app.jsonl`.
-- ✅ **Circuit-Breaker trippt wie designed**: nach 5 Failures
-  (`circuit_opened service=meta_send threshold=5 window_s=60
-  reopens_at=257623.1`). Phase-8-C8.3 Live-beweisen. Folgende
-  `/ping`s werden jetzt short-circuited ohne HTTP.
-
-**Ursache vermutlich** (muss morgen verifiziert werden):
-- **Token abgelaufen** — wahrscheinlich ein Temporary 24h-Token
-  aus der Meta-Dashboard-"API Setup"-Seite statt eines Permanent
-  System-User-Tokens. Token im Keychain fängt mit `EAANWD147E…`
-  an, was Format-mäßig plausibel ist, aber 401 bedeutet Meta
-  erkennt es nicht.
-- Andere Kandidaten: Token hat nicht `whatsapp_business_messaging`-
-  Permission, oder Token gehört zu einer anderen App als die
-  Phone-Number-ID `1130442710144663`.
-
-**Keychain-Verifikation war grün**:
-```
-meta-access-token     → EAANWD147E…  (alle Zeichen da, nicht leer)
-meta-phone-number-id  → 1130442710144663
-```
-
-## Nächster Schritt morgen
-
-1. **Root-Cause verifizieren** mit zwei Curls direkt gegen Meta:
-   ```bash
-   TOKEN=$(security find-generic-password -s whatsbot -a meta-access-token -w)
-   echo "=== Test 1: Token gültig? ==="
-   curl -s "https://graph.facebook.com/v23.0/me" -H "Authorization: Bearer $TOKEN"
-   echo
-   echo "=== Test 2: Token darf diese Phone Number? ==="
-   curl -s "https://graph.facebook.com/v23.0/1130442710144663" -H "Authorization: Bearer $TOKEN"
-   echo
-   ```
-   - Antwort mit `{"error":{"message":"Invalid OAuth access token"…}}` → Token ist tot, neu generieren.
-   - Antwort mit `{"error":{"message":"Unsupported request"/"missing permission"…}}` → Permission fehlt.
-   - Antwort mit `{"id":"…","name":"…"}` bzw.
-     `{"display_phone_number":"…"}` → Token gültig, Problem liegt
-     woanders (dann tiefer graben: App-Modus "Live" vs.
-     "Development", Test-Recipient-Whitelist).
-
-2. **Fix**: in developers.facebook.com → App "wibot" → **WhatsApp** (nicht
-   Facebook Login for Business, das ist ein anderes Produkt!) →
-   **Configuration** oder **API Setup**. Dort:
-   - **System Users** öffnen, User auswählen, **Generate Token**
-     klicken, WhatsApp-App auswählen, Scopes
-     `whatsapp_business_messaging` + `whatsapp_business_management`,
-     **Never Expires** auswählen.
-   - Token-String kopieren.
-
-3. **Keychain updaten**:
-   ```bash
-   security add-generic-password -U -s whatsbot -a meta-access-token -w
-   # (Prompt erscheint — Token einfügen, Enter)
-   ```
-
-4. **Bot neu starten** (löst auch den OPEN Circuit-Breaker, weil
-   Bot-Restart = neue Module-level-Registry):
-   ```bash
-   launchctl kickstart -k gui/$UID/com.local.whatsbot
-   ```
-
-5. **Re-Test**: vom Handy `/ping` → Reply sollte ankommen.
-   Im `app.jsonl`: `outbound_message_sent message_id=wamid.*`.
-
-6. **Phase-10-Schluss-Commit**: wenn Handy-Test grün, machen wir
-   den abschließenden `chore(phase-10): C10.5 live verified`-
-   Commit und setzen C10.5 auf completed.
-
-**Alternative wenn Permanent-Token zu viel Aufwand**: das
-temporäre 24h-Token reicht für Produktiv-Test; wir müssen es
-halt täglich rotieren bis du zum System User kommst. Kein
-Blocker.
-
-## Was NICHT verloren geht beim Schlafen
-
-- Der bisherige Phase-10-Code steht als Commit `feat(phase-10):
-  outbound via WhatsApp Cloud API — C10.5 live debug pending` im
-  main-Branch. 1572 Tests grün, mypy clean, ruff clean.
-- Diese Datei (`current-phase.md`) ist die einzige Quelle, die du
-  morgen mit einem "weiter" brauchst — der Claude der morgen kommt
-  liest sie automatisch beim Session-Start und sieht:
-  Phase-10-Code fertig, C10.5 wartet auf Token-Debug, die zwei
-  Curl-Commands stehen oben, der Fix-Weg ist dokumentiert.
-
-## Ursprünglich (Pre-Phase-10, zur Erinnerung)
-
-Weiter unten steht der Stand vor dem Impl-Debt-Fix
-— nicht mehr relevant für Phase 10, aber für
-historische Debug-Wege hilfreich.
-
-## Heutige Betriebs-Anpassung (nicht-Code)
-
-- **Keychain `allowed-senders` normalisiert**: Meta liefert die
-  Absender-Nummer ohne `+` (`491716598519`). Ursprünglicher
-  Keychain-Eintrag `+491716598519,+4915228995372` hat
-  `sender_not_allowed` getriggert. Per `security add-generic-
-  password -U` auf `491716598519,4915228995372` gestellt, Bot
-  reloaded, danach `command_routed` grün.
-- **Follow-up**: `whatsbot/domain/whitelist.py::is_allowed` macht
-  bewusst exakten String-Match („no + optional" laut Dokstring).
-  Realität widerspricht dem Kommentar. Entweder Dokstring +
-  INSTALL.md klarstellen (Format ohne `+`), oder Normalisierung
-  auf beiden Seiten einbauen (`sender.lstrip('+')` in
-  `parse_whitelist` + `is_allowed`). Low-priority, nicht-
-  blockierend, Entscheidung morgen.
-
-**Nächster Schritt morgen**: WhatsAppCloudSender-Mini-Phase
-starten (Plan oben). Als erstes `.claude/rules/phase-10.md`
-schreiben (gleiches Format wie phase-6/7/8), User-Freigabe
-einholen, dann implementieren.
-
-## Wie ich in der nächsten Session weitermache
-
-1. Diese Datei lesen.
-2. `git log --oneline -12` für den Commit-Stand bis Phase-9-Close.
+1. Diese Datei lesen — du siehst "Phase 1-10 komplett, Bot
+   produktiv".
+2. `git log --oneline -15` für den Commit-Stand.
 3. `venv/bin/pytest tests/unit/ tests/integration/ tests/smoke.py
    --ignore=tests/unit/test_hook_common.py
    --ignore=tests/integration/test_hook_script.py
-   --ignore=tests/integration/test_hook_fail_closed.py`
-   sollte **1542/1542 grün** (+ 1 skipped wenn ffmpeg fehlt)
-   zeigen. mypy --strict clean auf 120 source files. ruff clean.
-4. `make smoke` separat laufen lassen — muss in unter 2 s grün
-   durchlaufen.
-5. **Live-Deployment** per `docs/INSTALL.md` — wenn der Build den
-   ersten echten WhatsApp-Ping vom Handy beantwortet, ist das
-   Projekt produktiv.
+   --ignore=tests/integration/test_hook_fail_closed.py` sollte
+   **1572/1572 grün** + 1 live-skipped zeigen. mypy --strict
+   clean, ruff clean.
+4. Offene Follow-ups siehe unten ("Bekannte Follow-ups,
+   nicht-blockierend"). Keiner davon zwingend.
+
+## Bekannte Follow-ups, nicht-blockierend
+
+- **Whitelist-Normalisierung**: `domain/whitelist.py::is_allowed`
+  macht bewusst exakten String-Match. Realität: Meta liefert
+  Absender ohne `+` (`491716598519`), Keychain musste heute
+  entsprechend ohne `+` gesetzt werden. Entweder Dokstring +
+  INSTALL.md klarstellen oder beidseitig `.lstrip('+')`.
+  Entscheidung offen.
+- **Meta Delivery-Status-Tracking**: Meta schickt `statuses`-
+  Events für sent/delivered/read. Aktueller Webhook-Handler
+  routet nur `messages`. Nice-to-have für `/status`, kein
+  Blocker.
+- **Schritt 10 Live-Deployment**: SIM-Port-Lock beim Carrier
+  aktivieren (Spec §24). User-Action, außerhalb Code.
+- **Token-Rotation-Reminder**: Der aktuelle Token ist
+  "Never expires", aber Meta kann ihn bei App-Permission-
+  Änderungen revozieren. Wenn in Zukunft plötzlich 401s
+  auftauchen, in `docs/RUNBOOK.md` §Secret-Rotation nachsehen.
+
+## Historische Notiz — Phase-9-Betriebs-Anpassung
+
+Am 2026-04-23 wurde der Keychain-Eintrag `allowed-senders` von
+`+491716598519,+4915228995372` auf `491716598519,4915228995372`
+normalisiert, weil Meta die Absender-Nummern ohne `+` liefert und
+`domain/whitelist.py::is_allowed` exakten String-Match macht.
+Folge-Entscheidung (offen, siehe Follow-ups oben): Dokstring
+klarstellen oder beidseitig `.lstrip('+')`.
 
 ## Phase 9 liefert (Live-Verhalten)
 
