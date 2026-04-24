@@ -8,7 +8,8 @@ Alle Commands auf einer Seite. Spec §11.
 |---|---|---|
 | `/new <name>` | Leeres Projekt anlegen (Normal-Mode) | — |
 | `/new <name> git <url>` | Git-Clone + Smart-Detection | — |
-| `/ls` | Alle Projekte mit Mode + Status | — |
+| `/import <name> <pfad>` | Bestehenden Ordner als Projekt anhängen | — |
+| `/ls` | Alle Projekte mit Mode + Status (imported zeigt Pfad) | — |
 | `/p` | Zeigt aktives Projekt | — |
 | `/p <name>` | Aktives Projekt wechseln, startet tmux+Claude | — |
 | `/p <name> <prompt>` | Einmaliger Prompt ohne aktiv-Wechsel | — |

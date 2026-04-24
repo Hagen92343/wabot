@@ -1,9 +1,11 @@
 # Aktueller Stand
 
-**Projekt-Status**: **Phase 1-10 komplett ✅ — Bot produktiv.**
-Handy-Ping kommt durch, Claude-Antwort kommt aufs Handy, End-to-End
-verifiziert 2026-04-24 15:25 UTC. Offen ist nur noch Schritt 10
-(SIM-Port-Lock beim Carrier, User-Action außerhalb Code).
+**Projekt-Status**: **Phase 1-11 komplett ✅ — Bot produktiv.**
+Handy-Ping verifiziert 2026-04-24 15:25 UTC (Phase 10). Phase 11
+fügt `/import <name> <absoluter-pfad>` hinzu: bestehende Ordner lassen
+sich jetzt als Projekte fernsteuern. Offen als Live-Test: C11.6
+(`/import wabot /Users/hagenmarggraf/whatsbot` am echten Bot).
+SIM-Port-Lock beim Carrier bleibt User-Action außerhalb Code.
 
 ## Deployment-Stand (Stand 2026-04-23 abend)
 

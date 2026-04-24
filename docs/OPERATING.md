@@ -145,47 +145,57 @@ open ~/projekte/
 
 ## 4. Bestehende Projekte an den Bot anhängen
 
-**Kurz**: Es gibt im MVP kein `/import <pfad>`-Command. Das ist
-bewusst weggelassen, weil die meisten bestehenden Projekte in
-geschützten Ordnern liegen und die Pfad-Rules der Pre-Tool-Hooks
-das blockieren würden.
-
-Drei Wege, je nach Schmerzgrenze:
-
-### Weg A — Neu klonen (sauber, empfohlen)
+Ab Phase 11: `/import` hängt einen existierenden Ordner als Projekt
+an, ohne ihn zu verschieben oder zu kopieren.
 
 ```
-/new meinprojekt git git@github.com:USER/meinprojekt.git
+/import <name> <absoluter-pfad>
 ```
 
-Landet in `~/projekte/meinprojekt/`. Smart-Detection macht
-Allow-Rules-Vorschläge. Du approvst mit `/allow batch approve`.
-Fertig.
+Beispiel für den whatsbot-Repo selbst:
 
-Nachteil: zwei Arbeitskopien, wenn du auch noch einen Desktop-Clone
-hast. Lösung: GitHub als Sync-Hub (siehe §5).
-
-### Weg B — Symlink-Trick (wenn du unbedingt dieselbe Kopie willst)
-
-```bash
-ln -s /pfad/zum/bestehenden/projekt ~/projekte/meinprojekt
-sqlite3 ~/Library/Application\ Support/whatsbot/state.db \
-  "INSERT INTO projects (name, source_mode, source, created_at, mode)
-   VALUES ('meinprojekt', 'empty', NULL, datetime('now'), 'normal');"
+```
+/import wabot /Users/hagenmarggraf/whatsbot
 ```
 
-**Warnung**: Wenn das Symlink-Target in `~/Desktop` / `~/Documents` /
-`~/Downloads` liegt, wirst du Permission-Probleme mit dem Hook kriegen.
-Die Pfad-Rules aus Spec §12 Layer 3 lassen automatisch nur
-`~/projekte/<current>/*` und `/tmp/*` durch. Alles andere → PIN-
-Rückfrage pro Write.
+Was passiert:
+1. DB-Row wird angelegt mit `source_mode=imported` und dem echten
+   Pfad.
+2. Der Bot legt in den Ordner fehlende dotfiles ab: `.whatsbot/`,
+   `.whatsbot/outputs/`, `CLAUDE.md`, `.claudeignore`. **Bereits
+   vorhandene Dateien werden nicht überschrieben** — du siehst im
+   Reply eine Liste "Unverändert gelassen".
+3. Smart-Detection läuft und schlägt Allow-Rules vor (per
+   `/allow batch approve` übernehmen).
+4. Die Pfad-Rules des Pre-Tool-Hooks erkennen den Ordner jetzt als
+   "Projekt-Scope" — Writes da drin laufen wie bei `/new`-Projekten
+   ohne PIN-Rückfragen.
 
-### Weg C — Sauber trennen (was wir gewählt haben)
+`/rm <name>` für importierte Projekte entfernt nur die DB-Zeile,
+der Ordner bleibt unangetastet (wir haben ihn ja nicht angelegt).
 
-Neue bot-gesteuerte Projekte immer per `/new` in `~/projekte/`
-anlegen. Alte Arbeitsordner lässt du wo sie sind und arbeitest dort
-klassisch im Terminal / Cursor / VS Code weiter. Keine Verwirrung,
-keine doppelten Arbeitskopien.
+### Einschränkungen
+
+- **Geschützte Pfade werden abgelehnt**: `~/Library`, `~/.ssh`,
+  `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.1password`, `/etc`,
+  `/System`, `/Library`, `/usr`, `/bin`, `/sbin`.
+- **TCC-Warnung**: bei Pfaden unter `~/Desktop`, `~/Documents`,
+  `~/Downloads`, `~/Pictures`, `~/Movies`, `~/Music` akzeptiert der
+  Bot den Import mit Warnhinweis — macOS TCC-Protection kann trotz
+  allem Writes blockieren. Lösung: LaunchAgent-Binary via
+  Systemeinstellungen → Datenschutz & Sicherheit → "Vollständiger
+  Festplattenzugriff" freigeben.
+- **Doppelte Registrierung** (gleicher Name oder gleicher Pfad) wird
+  erkannt und abgelehnt.
+- **`/new` bleibt für neue Projekte**: Frisches leeres Projekt oder
+  Git-Clone landen weiterhin in `~/projekte/<name>`.
+
+### Wenn du ohne Import arbeiten willst
+
+Alternative: neue Bot-Projekte per `/new` in `~/projekte/` anlegen
+und dort arbeiten. Alte Ordner im Desktop / Documents lässt du wo
+sie sind und arbeitest dort klassisch im Terminal / Cursor / VS
+Code weiter. Keine Verwirrung, keine doppelten Arbeitskopien.
 
 ---
 

@@ -5,6 +5,90 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
+### Phase 11 — `/import` bestehende Projekte anhängen (complete) ✅
+
+Das MVP (Phase 1-10) konnte Projekte nur per `/new` (leerer Ordner
+in `~/projekte/`) oder `/new git <url>` (frischer Clone dorthin)
+anlegen. Für "ich habe 20 Repos lokal und will die steuern" fehlte
+der Import-Pfad. Phase 11 schließt das.
+
+#### C11.1 — Migration-Framework + `001_project_path.sql`
+
+- Neue Infrastruktur: `PRAGMA user_version` als Source-of-Truth,
+  `sql/migrations/NNN_*.sql`, `run_migrations()` in `sqlite_repo`.
+- Migration 001: `projects.path TEXT` (nullable) hinzu,
+  `source_mode` CHECK um `'imported'` erweitert via
+  rename-copy-drop-Pattern. Script kontrolliert eigene Transaktion
+  + bumpt `user_version` selbst (Mid-Script-Crash lässt V(N-1)
+  intact).
+- Runner toggled `foreign_keys` OFF/ON, `foreign_key_check`
+  post-run, asserts version bump.
+- Fresh-Install: `apply_schema` + `_set_user_version` direkt auf
+  `latest_migration_version()` → keine Re-Runs.
+- Tests: 18 Migration-Tests.
+
+#### C11.2 — Domain + Repo erweitert
+
+- `Project.path: Path | None` (default None = Legacy).
+  `__post_init__` validiert: wenn gesetzt, absolut.
+- `SourceMode.IMPORTED` hinzu.
+- Neuer pure Helper `resolved_path(project, projects_root)`.
+- `ProjectRepository.exists_with_path(path) -> bool` Port-Methode.
+- SQLite-Adapter: INSERT/Row-Mapping mit `path`-Column.
+- Tests: 12 neue Tests.
+
+#### C11.3 — `ProjectService.import_existing` + Pfad-Refactoring
+
+- `ImportOutcome` dataclass: project, detection, artifacts_created,
+  artifacts_preserved, warnings.
+- `import_existing(name, path)`: Validation (absolut, exists, dir,
+  nicht in _PROTECTED_ROOTS, Name+Pfad noch nicht registriert),
+  TCC-Warn für Pfade unter ~/Desktop/Documents/Downloads/…,
+  Symlink-Resolve, idempotentes Schreiben bot-managed dotfiles
+  (`.whatsbot/`, `CLAUDE.md`, `.claudeignore`, config.json),
+  Smart-Detection.
+- `post_clone.write_claudeignore_if_missing` +
+  `write_config_json_if_missing` (Helper für idempotent-by-default).
+- Alle Stellen, die bisher `projects_root / name` hardgecoded
+  hatten, nutzen jetzt `resolved_path`:
+  `SessionService.ensure_started` + `_start_transcript_watch`,
+  `HookService._resolve_project_cwd`, `AllowService.*_path`.
+- `DeleteService` non-destructive für IMPORTED: `DeleteOutcome.
+  trashed_to` ist `Path | None`; bei `source_mode=IMPORTED` bleibt
+  der Ordner unberührt, nur die DB-Row geht.
+- CommandHandler `/rm`-Reply differenziert: "gelöscht (verschoben)"
+  vs "entregistriert (Ordner unberührt)".
+- Tests: 15 neue import_existing-Tests.
+
+#### C11.4 — `/import`-Command + `/ls`-Pfad-Anzeige
+
+- CommandHandler-Route `/import <name> <absoluter-pfad>` mit
+  Usage-Hint für fehlende Args, `⚠️`-Fehler-Formatierung für
+  alle Validation-Pfade.
+- `_format_import_reply` rendert ✅-Header, Pfad, Liste neu-
+  angelegter und unveränderter Artefakte, Rule-Vorschläge-Counter,
+  TCC-Warnings.
+- `format_listing` in Domain zeigt bei `source_mode=IMPORTED` den
+  Pfad als Suffix (` → <path>`), damit `/ls` auf einen Blick zeigt,
+  welcher Ordner wo dranhängt.
+- Empty-Hint erwähnt `/import` als dritte Option neben `/new`.
+- Tests: 11 neue CommandHandler-Tests.
+
+#### C11.5 — Docs + E2E
+
+- `docs/CHEAT-SHEET.md` um `/import`-Zeile erweitert.
+- `docs/OPERATING.md` § "Bestehende Projekte anhängen" komplett
+  umgeschrieben: `/import` ist jetzt der Hauptweg, Symlink-Trick
+  als Legacy-Workaround gestrichen, geschützte Pfade + TCC-
+  Warnings explizit.
+- E2E: `tests/integration/test_import_e2e.py` — 3 Tests via
+  signed /webhook (happy-path Import→ls→rm-preserve-directory,
+  nonexistent path, relative path).
+
+**Tests-Stand Phase 11**: 1631 passed + 1 live-skipped (Phase-10
+Baseline 1572 + ~59 neue Phase-11-Tests). mypy --strict clean auf
+120 source files, ruff clean. 5 atomare Commits pro Checkpoint.
+
 ### Phase 10 — WhatsAppCloudSender (complete) ✅
 
 Mini-Phase, aufgedeckt im Live-Deployment nach Phase 9:
