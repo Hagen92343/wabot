@@ -1225,3 +1225,110 @@ def test_mode_switch_rejects_bogus_target(
     result = handler.handle("/mode chaos")
     assert "normal | strict | yolo" in result.reply
     assert mode_service.change_calls == []
+
+
+# --- /import (Phase 11) ----------------------------------------------------
+
+
+def test_import_without_args_returns_usage(handler: CommandHandler) -> None:
+    result = handler.handle("/import")
+    assert "Verwendung" in result.reply
+    assert "/import <name>" in result.reply
+
+
+def test_import_without_path_returns_usage(handler: CommandHandler) -> None:
+    result = handler.handle("/import foo")
+    assert "Verwendung" in result.reply
+
+
+def test_import_happy_path_registers_project(
+    handler: CommandHandler, tmp_path: Path
+) -> None:
+    target = tmp_path / "existing_dir"
+    target.mkdir()
+    result = handler.handle(f"/import wabot {target}")
+    assert "✅" in result.reply
+    assert "wabot" in result.reply
+    assert str(target.resolve()) in result.reply
+    # /ls zeigt es
+    listing = handler.handle("/ls")
+    assert "wabot" in listing.reply
+    assert "(imported)" in listing.reply
+
+
+def test_import_shows_preserved_claude_md(
+    handler: CommandHandler, tmp_path: Path
+) -> None:
+    target = tmp_path / "existing_dir"
+    target.mkdir()
+    (target / "CLAUDE.md").write_text("# my own\n", encoding="utf-8")
+    result = handler.handle(f"/import mine {target}")
+    assert "Unveraendert" in result.reply or "Unverändert" in result.reply
+    assert "CLAUDE.md" in result.reply
+
+
+def test_import_invalid_path_returns_error(handler: CommandHandler) -> None:
+    result = handler.handle("/import foo /does/not/exist/ever")
+    assert "⚠️" in result.reply
+    assert "existiert nicht" in result.reply
+
+
+def test_import_relative_path_returns_error(handler: CommandHandler) -> None:
+    result = handler.handle("/import foo relative/path")
+    assert "⚠️" in result.reply
+    assert "absolut" in result.reply
+
+
+def test_import_duplicate_name_returns_error(
+    handler: CommandHandler, tmp_path: Path
+) -> None:
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    handler.handle(f"/import mine {first}")
+    result = handler.handle(f"/import mine {second}")
+    assert "⚠️" in result.reply
+    assert "existiert schon" in result.reply
+
+
+def test_import_duplicate_path_returns_error(
+    handler: CommandHandler, tmp_path: Path
+) -> None:
+    target = tmp_path / "shared"
+    target.mkdir()
+    handler.handle(f"/import first {target}")
+    result = handler.handle(f"/import second {target}")
+    assert "⚠️" in result.reply
+    assert "unter einem anderen Namen" in result.reply
+
+
+def test_import_invalid_name_returns_error(
+    handler: CommandHandler, tmp_path: Path
+) -> None:
+    target = tmp_path / "some_dir"
+    target.mkdir()
+    result = handler.handle(f"/import Bad@Name {target}")
+    assert "⚠️" in result.reply
+
+
+def test_import_happy_path_shows_suggested_rules_count(
+    handler: CommandHandler, tmp_path: Path
+) -> None:
+    target = tmp_path / "node_dir"
+    target.mkdir()
+    (target / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+    result = handler.handle(f"/import nodeproj {target}")
+    assert "Rule-Vorschläge" in result.reply
+    assert "package.json" in result.reply
+
+
+def test_ls_shows_imported_path(handler: CommandHandler, tmp_path: Path) -> None:
+    target = tmp_path / "imported_target"
+    target.mkdir()
+    handler.handle(f"/import myproj {target}")
+    result = handler.handle("/ls")
+    assert "myproj" in result.reply
+    assert "(imported)" in result.reply
+    # Path-Suffix sollte sichtbar sein.
+    assert str(target.resolve()) in result.reply

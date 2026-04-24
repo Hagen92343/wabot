@@ -152,13 +152,20 @@ def format_listing(listings: list[ProjectListing]) -> str:
         return (
             "noch keine Projekte. Lege eines an mit:\n"
             "  /new <name>            — leeres Projekt\n"
-            "  /new <name> git <url>  — Git-Klon (Phase 2.2)"
+            "  /new <name> git <url>  — Git-Klon\n"
+            "  /import <name> <path>  — bestehenden Ordner anhaengen"
         )
     lines = ["Projekte:"]
     for entry in listings:
         marker = "▶" if entry.is_active else " "
         emoji = _MODE_EMOJI.get(entry.project.mode, "·")
+        source = entry.project.source_mode.value
+        suffix = ""
+        if entry.project.source_mode is SourceMode.IMPORTED and entry.project.path is not None:
+            # Imported projects show their path so the user can tell at
+            # a glance which bestehender Ordner got wired up.
+            suffix = f" → {entry.project.path}"
         lines.append(
-            f"  {marker} {emoji} {entry.project.name:<24} " f"({entry.project.source_mode.value})"
+            f"  {marker} {emoji} {entry.project.name:<24} ({source}){suffix}"
         )
     return "\n".join(lines)

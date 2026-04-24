@@ -43,6 +43,8 @@ from whatsbot.application.mode_service import (
 )
 from whatsbot.application.panic_service import PanicService
 from whatsbot.application.project_service import (
+    ImportOutcome,
+    InvalidImportPathError,
     ProjectFilesystemError,
     ProjectService,
 )
@@ -71,6 +73,8 @@ from whatsbot.ports.project_repository import (
 from whatsbot.ports.tmux_controller import TmuxError
 
 _NEW_PREFIX: Final = "/new "
+_IMPORT_PREFIX: Final = "/import "
+_IMPORT_COMMAND: Final = "/import"
 _LS_COMMAND: Final = "/ls"
 _P_COMMAND: Final = "/p"
 _P_PREFIX: Final = "/p "
@@ -184,6 +188,10 @@ class CommandHandler:
         # Project-management
         if cmd.startswith(_NEW_PREFIX):
             return self._handle_new(cmd[len(_NEW_PREFIX) :].strip())
+        if cmd == _IMPORT_COMMAND:
+            return self._handle_import("")
+        if cmd.startswith(_IMPORT_PREFIX):
+            return self._handle_import(cmd[len(_IMPORT_PREFIX) :].strip())
         if cmd == _LS_COMMAND:
             return self._handle_list()
 
@@ -342,6 +350,77 @@ class CommandHandler:
             ),
             command="/new git",
         )
+
+    # ---- /import <name> <absolute-path> -----------------------------------
+
+    def _handle_import(self, args: str) -> CommandResult:
+        """Register an existing directory as a whatsbot project.
+
+        Parse ``args`` as ``<name> <absolute-path>``. The path may contain
+        spaces in theory — but WhatsApp-typed paths with spaces are rare,
+        and ``split(maxsplit=1)`` lets us accept a trailing path with
+        spaces by treating everything after the name as the path.
+        """
+        parts = args.split(maxsplit=1)
+        if len(parts) != 2:
+            return CommandResult(
+                reply=(
+                    "Verwendung:\n"
+                    "  /import <name> <absoluter-pfad>\n"
+                    "\n"
+                    "Haengt einen bestehenden Ordner als Projekt an. Der "
+                    "Ordner bleibt wo er ist; der Bot legt nur fehlende "
+                    "dotfiles (CLAUDE.md, .claudeignore, .whatsbot/) an "
+                    "und registriert das Projekt in der DB."
+                ),
+                command="/import",
+            )
+        raw_name, raw_path = parts
+        try:
+            outcome = self._projects.import_existing(raw_name, raw_path)
+        except InvalidProjectNameError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/import")
+        except InvalidImportPathError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/import")
+        except ProjectAlreadyExistsError as exc:
+            return CommandResult(reply=f"⚠️ {exc}", command="/import")
+        except ProjectFilesystemError as exc:
+            self._log.error(
+                "project_import_fs_failed",
+                name=raw_name,
+                path=raw_path,
+                error=str(exc),
+            )
+            return CommandResult(reply=f"⚠️ {exc}", command="/import")
+
+        return CommandResult(
+            reply=self._format_import_reply(outcome),
+            command="/import",
+        )
+
+    def _format_import_reply(self, outcome: ImportOutcome) -> str:
+        lines = [
+            f"✅ '{outcome.project.name}' importiert",
+            f"   Pfad: {outcome.project.path}",
+        ]
+        if outcome.artifacts_created:
+            lines.append("   Neu angelegt: " + ", ".join(outcome.artifacts_created))
+        if outcome.artifacts_preserved:
+            lines.append(
+                "   Unveraendert gelassen: "
+                + ", ".join(outcome.artifacts_preserved)
+            )
+        suggestions = len(outcome.detection.suggested_rules)
+        if suggestions:
+            artefacts = ", ".join(outcome.detection.artifacts_found) or "keine"
+            lines.append(
+                f"💡 {suggestions} Rule-Vorschläge aus {artefacts}.\n"
+                f"   /allow batch approve  — alle übernehmen\n"
+                f"   /allow batch review   — einzeln anschauen"
+            )
+        for warning in outcome.warnings:
+            lines.append(f"⚠️ {warning}")
+        return "\n".join(lines)
 
     # ---- /ls --------------------------------------------------------------
 
