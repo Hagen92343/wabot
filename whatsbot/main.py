@@ -72,7 +72,10 @@ from whatsbot.adapters.tmux_subprocess import SubprocessTmuxController
 from whatsbot.adapters.watchdog_transcript_watcher import (
     WatchdogTranscriptWatcher,
 )
-from whatsbot.adapters.whatsapp_sender import LoggingMessageSender
+from whatsbot.adapters.whatsapp_sender import (
+    LoggingMessageSender,
+    WhatsAppCloudSender,
+)
 from whatsbot.adapters.whisper_cpp_transcriber import WhisperCppTranscriber
 from whatsbot.application.active_project_service import ActiveProjectService
 from whatsbot.application.allow_service import AllowService
@@ -117,6 +120,7 @@ from whatsbot.ports.process_killer import ProcessKiller
 from whatsbot.ports.secrets_provider import (
     KEY_ALLOWED_SENDERS,
     KEY_META_ACCESS_TOKEN,
+    KEY_META_PHONE_NUMBER_ID,
     SecretNotFoundError,
     SecretsProvider,
 )
@@ -197,8 +201,11 @@ def create_app(
 
     _set_circuit_observer(_observe_circuit)
 
-    raw_sender: MessageSender = (
-        message_sender if message_sender is not None else LoggingMessageSender()
+    raw_sender: MessageSender = _build_outbound_sender(
+        settings=settings,
+        secrets=secrets_provider,
+        override=message_sender,
+        log=log,
     )
     # Every outgoing WhatsApp body routes through the Spec §10 redaction
     # pipeline. The decorator is infallible: if redaction would crash
@@ -795,6 +802,54 @@ def _open_state_db_for(settings: Settings) -> sqlite3.Connection:
     """Open the spec-§4 state DB. Centralised so tests can monkeypatch
     if they need to redirect production-path access."""
     return open_state_db(db_path=settings.db_path, backup_dir=settings.backup_dir)
+
+
+def _build_outbound_sender(
+    *,
+    settings: Settings,
+    secrets: SecretsProvider | None,
+    override: MessageSender | None,
+    log: object,
+) -> MessageSender:
+    """Fact-based selection: explicit override wins; TEST/DEV get the
+    logging sender; PROD with both Meta secrets populated gets the
+    real WhatsApp Cloud sender; PROD with missing secrets falls back
+    to logging and emits a WARN.
+
+    No env-flag — the decision is derived from ``Settings.env`` and the
+    presence of ``meta-access-token`` + ``meta-phone-number-id`` in the
+    Keychain.
+    """
+    if override is not None:
+        return override
+    if settings.env is not Environment.PROD:
+        return LoggingMessageSender()
+    if secrets is None:
+        if hasattr(log, "warning"):
+            log.warning("meta_credentials_missing_no_secrets_provider")
+        return LoggingMessageSender()
+    token = _safe_get_secret(secrets, KEY_META_ACCESS_TOKEN)
+    phone_number_id = _safe_get_secret(secrets, KEY_META_PHONE_NUMBER_ID)
+    if not token or not phone_number_id:
+        if hasattr(log, "warning"):
+            log.warning(
+                "meta_credentials_missing_falling_back_to_logging_sender",
+                has_access_token=bool(token),
+                has_phone_number_id=bool(phone_number_id),
+            )
+        return LoggingMessageSender()
+    return WhatsAppCloudSender(
+        access_token=token,
+        phone_number_id=phone_number_id,
+    )
+
+
+def _safe_get_secret(secrets: SecretsProvider, key: str) -> str:
+    """Return the secret value or ``""`` on any lookup failure."""
+    try:
+        return secrets.get(key) or ""
+    except SecretNotFoundError:
+        return ""
 
 
 def _first_allowed_sender(secrets_provider: SecretsProvider) -> str | None:

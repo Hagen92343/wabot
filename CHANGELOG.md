@@ -5,6 +5,104 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
+### Phase 10 — WhatsAppCloudSender (C10.1-C10.4 complete, C10.5 live) 📬
+
+Mini-Phase, aufgedeckt im Live-Deployment nach Phase 9:
+`WhatsAppCloudSender.send_text` war seit Phase 1 ein Skelett mit
+`NotImplementedError`. Integration-Tests + Smoke liefen gegen den
+`LoggingMessageSender`, daher nie aufgefallen. Phase 10 schließt
+das Outbound-Loch.
+
+#### C10.1 — WhatsAppCloudSender.send_text implementiert
+
+- `whatsbot/adapters/whatsapp_sender.py::WhatsAppCloudSender.send_text`
+  macht jetzt einen echten httpx-POST gegen `POST
+  https://graph.facebook.com/v23.0/{phone_number_id}/messages` mit
+  Bearer-Auth + JSON-Body (`messaging_product`, `recipient_type`,
+  `to`, `type`, `text.preview_url`, `text.body`).
+- Tenacity-Retry: 3 Versuche, exponential backoff (max 16 s), nur
+  bei `_RetryableSendError` (Netzwerk + 5xx). 4xx short-circuit
+  mit `MessageSendError`.
+- Timeouts: connect 5 s, read 30 s, identisch zu
+  `MetaMediaDownloader` (Phase 7).
+- `to`-Normalisierung: führende `+` + Whitespace werden am Eingang
+  gestrippt (Meta erwartet digit-only).
+- Logging: `outbound_message_sent` mit `to_tail4` (last 4 digits,
+  nicht volle Nummer), `body_len`, `message_id` aus Response.
+  Bei 4xx: `outbound_message_failed` mit `status_code` (body
+  nicht geloggt — Meta-Error-Bodies echoen gelegentlich den
+  Input).
+- `@resilient(META_SEND_SERVICE)` bleibt drauf; drei tenacity-
+  Retries zählen als **ein** Circuit-Breaker-Failure (Invariante
+  wie bei `MetaMediaDownloader`).
+- **Port-Änderung**: `MessageSendError` in
+  `whatsbot/ports/message_sender.py` neu; Protocol-Docstring
+  korrigiert ("may raise on unrecoverable failures" statt "must
+  not raise").
+- 16 unit tests `tests/unit/test_whatsapp_sender.py` via
+  `httpx.MockTransport` — happy path, Phone-Normalisierung (inkl.
+  Whitespace + empty-guard), Body-Shape, Bearer-Auth + JSON-
+  Content-Type, 4xx/401 no-retry, 5xx 3 retries, Netzwerk-Error
+  retries, 5xx→5xx→200 recovery, Constructor-Guards,
+  Circuit-Breaker-Counter-Invariante, message_id-Extraktion.
+
+#### C10.2 — Circuit-Breaker-Integration verifiziert
+
+- `tests/integration/test_whatsapp_sender_circuit.py` — 2 Tests
+  analog zu `test_resilience_circuit_integration.py` (Phase 8
+  C8.3): 5 sequentielle retry-ausschöpfende Failures trippen den
+  `meta_send`-Breaker, 6ter Call short-circuited ohne HTTP;
+  Cooldown → HALF_OPEN-Probe → CLOSED bei Erfolg.
+
+#### C10.3 — main.py Sender-Selection fact-based
+
+- `_build_outbound_sender`-Helper in `main.py`:
+  - explizite `override` → gewinnt immer (Test-Pfad).
+  - `Settings.env` ist TEST oder DEV → `LoggingMessageSender`
+    (Test + Dev-Maschinen sollen nicht versehentlich Meta
+    kontaktieren).
+  - PROD + beide Secrets (`meta-access-token` +
+    `meta-phone-number-id`) gesetzt + non-empty →
+    `WhatsAppCloudSender`.
+  - PROD + fehlender/leerer Secret-Wert → `LoggingMessageSender`
+    mit WARN `meta_credentials_missing_falling_back_to_logging_sender`.
+  - PROD + `secrets=None` → `LoggingMessageSender` mit WARN
+    `meta_credentials_missing_no_secrets_provider`.
+- Kein neuer Env-Flag — Decision ist rein aus `Settings` +
+  Secrets-Präsenz ableitbar.
+- Zeilen 200-202 in `create_app` ersetzt durch den Helper-Call,
+  `override` = alter `message_sender`-Param (backwards-kompatibel
+  mit allen ~30 Integration-Tests).
+- 11 unit tests `tests/unit/test_main_sender_selection.py`
+  (override-Pfade, TEST, DEV mit vollen Secrets, PROD happy +
+  3 Failure-Pfade, parametrized `non_prod_envs_never_attempt_cloud`).
+
+#### C10.4 — Live-Integration-Test (skipped default)
+
+- `tests/integration/test_whatsapp_sender_live.py` —
+  `@pytest.mark.skipif(WHATSBOT_LIVE_META not set)`. Ein Test,
+  liest `WHATSBOT_LIVE_META_TOKEN` / `..._PHONE_NUMBER_ID` /
+  `..._TO` aus Env, schickt einen Test-Body mit ISO-Timestamp.
+  Läuft nicht in `make test` / `make smoke` — manuelle
+  Invocation dokumentiert im Modul-Docstring.
+
+**Tests-Stand Phase 10**: 1572 passed + 1 live-skipped (Baseline
+Phase-9 1542 + 30 neue Phase-10-Tests − 1 live-skip). mypy --strict
+clean auf 7 angefassten/neuen Files (`message_sender.py`,
+`whatsapp_sender.py`, `main.py`, 4 Test-Files). ruff clean auf
+denselben.
+
+**C10.5 blocked on Meta 401** — Live-Test vom Handy (Bot-Kickstart
++ `/ping`) bestätigt: Adapter sendet echte HTTP-POSTs an
+`graph.facebook.com/v23.0/1130442710144663/messages`, aber Meta
+lehnt jeden Call mit HTTP 401 Unauthorized ab. Circuit-Breaker
+trippt wie designed nach 5 Failures. Keychain-Werte vorhanden,
+Token fängt mit `EAANWD147E…` an. Debug-Weg dokumentiert in
+`.claude/rules/current-phase.md` ("C10.5 Live-Debug-Stand" +
+"Nächster Schritt morgen") — zwei Curl-Tests gegen `/me` und die
+Phone-Number-ID, dann ggf. Permanent System-User-Token
+regenerieren.
+
 ### Phase 9 — Docs + Smoke-Tests + Polish (complete) ✅
 
 Phase 9 macht aus dem Build ein Produkt. End-to-End-Smoke, eine

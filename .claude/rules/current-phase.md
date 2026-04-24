@@ -1,8 +1,8 @@
 # Aktueller Stand
 
-**Projekt-Status**: **Phase 1-9 komplett ✅** — Build-Phase zu Ende.
-**Live-Deployment läuft** nach `docs/INSTALL.md`. Ein Impl-Debt-
-Blocker gefunden, siehe unten.
+**Projekt-Status**: **Phase 1-9 komplett ✅ · Phase 10 C10.1–C10.4
+komplett ✅, C10.5 offen (User-Action).** Build-Phase zu Ende,
+Outbound-Loch geschlossen, warte auf Live-Re-Test vom Handy.
 
 ## Deployment-Stand (Stand 2026-04-23 abend)
 
@@ -41,46 +41,212 @@ Offen:
 - ⏭ **Schritt 10** — SIM-Port-Lock beim Carrier aktivieren
   (Spec §24, gegen SIM-Swap). User-Action, Spec-Pflicht vor
   Produktiv-Betrieb.
-- ⏭ **Schritt 11 (Outbound-Seite)** — Die Reply erreicht das
-  Handy noch nicht, weil `WhatsAppCloudSender` ungebaut ist
-  (siehe Impl-Debt unten).
+- ⏭ **Schritt 11 (Outbound-Seite · C10.5)** — Code ist fertig
+  (Phase 10 C10.1-C10.4), Re-Deploy + Handy-Verifikation steht
+  aus. Anleitung unten.
 
-## Impl-Debt: WhatsAppCloudSender ist Phase-1-Skelett
+## Phase 10 — WhatsAppCloudSender (C10.1-C10.4 done)
 
-**Fundstelle**: `whatsbot/adapters/whatsapp_sender.py:60` —
-`WhatsAppCloudSender.send_text` wirft bewusst
-`NotImplementedError` mit dem Kommentar *"Phase-1 skeleton … real
-implementation deferred to C2.x"*. Das Deferral wurde weder in
-Phase 2 noch in 3–9 eingelöst. Alle Integration-Tests + der
-Phase-9-Smoke laufen gegen den `LoggingMessageSender`, weshalb
-das nie aufgefallen ist.
+**Trigger**: Impl-Debt aus dem Live-Deployment:
+`WhatsAppCloudSender.send_text` war seit Phase 1 ein
+`NotImplementedError`-Skelett. Alle Phase-2-bis-9-Tests liefen
+gegen den `LoggingMessageSender`, daher nie aufgefallen. Konsequenz
+vorher: Bot empfängt Webhook → `outbound_message_dev` im Log → aus
+Handy-Sicht schweigt der Bot.
 
-**Konsequenz**: `main.py:200-202` wählt default
-`LoggingMessageSender()` — der Bot empfängt Meta-Webhooks,
-verarbeitet Commands, rendert Replies, **loggt** sie als
-`outbound_message_dev`, schickt aber nie einen HTTP-Call an
-`graph.facebook.com`. Aus Handy-Sicht: Bot schweigt.
+**Geliefert (2026-04-24)**:
+- **C10.1** — `WhatsAppCloudSender.send_text` echt: httpx-POST
+  gegen `POST https://graph.facebook.com/v23.0/{phone_number_id}/
+  messages`, Bearer-Auth, Body-Shape pro Meta-Spec, Timeouts
+  5/30s, tenacity-Retry (3x, 5xx + Netzwerk), 4xx short-circuit
+  mit `MessageSendError`. Phone-Normalisierung (strip leading `+`/
+  whitespace). Logging von `to_tail4` + `body_len` + `message_id`.
+  `@resilient(META_SEND_SERVICE)` bleibt, 3 Retries = 1 Breaker-
+  Failure (Invariante wie MetaMediaDownloader).
+- **C10.2** — Circuit-Breaker-Integration verifiziert: 5
+  sequentielle retry-ausschöpfende Failures trippen `meta_send`,
+  6ter Call short-circuited ohne HTTP; Cooldown → HALF_OPEN-
+  Probe → CLOSED bei Erfolg.
+- **C10.3** — `main.py::_build_outbound_sender`: fact-based
+  Selection. override > TEST/DEV → Logging; PROD + beide Secrets
+  → Cloud; PROD + fehlende Secrets → Logging mit WARN. Kein
+  neuer Env-Flag. ~30 Integration-Tests laufen weiter
+  unverändert via `override=message_sender`-Param.
+- **C10.4** — `tests/integration/test_whatsapp_sender_live.py`
+  liegt vor, skipped default, opt-in via `WHATSBOT_LIVE_META=1`.
 
-**Fix-Plan für morgen (neue Mini-Phase, Arbeitstitel Phase 10
-oder Phase 9.1)**:
-1. `WhatsAppCloudSender.send_text` implementieren: httpx-POST
-   gegen `https://graph.facebook.com/v23.0/{phone_number_id}/
-   messages` mit Bearer-Auth, Body
-   `{messaging_product:"whatsapp", to, type:"text", text:{body}}`.
-   Der `@resilient(META_SEND_SERVICE)`-Decorator sitzt schon
-   drauf — Retry + Circuit-Breaker greifen automatisch.
-2. `main.py` sender-Auswahl: prod + `meta-access-token` + `meta-
-   phone-number-id` im Keychain → `WhatsAppCloudSender`; sonst
-   `LoggingMessageSender`. Keine Env-Flags — reine Fact-based-
-   Wahl aus Settings.
-3. Unit-Tests via httpx MockTransport (happy-path, 4xx, 5xx,
-   timeout → retry → circuit-trip). Pattern analog zu den
-   Phase-7-MediaDownloader-Tests.
-4. Ein Integration-Test gegen echtes Meta (skipped wenn
-   `WHATSBOT_LIVE_META` nicht gesetzt) — der sendet einen
-   Test-Body an die eigene Handy-Nummer.
-5. CHANGELOG + `current-phase.md` schließen. Dann Live-Re-Test
-   mit `/ping` vom Handy → Reply am Handy sehen.
+**Neue Files**:
+- `whatsbot/adapters/whatsapp_sender.py` — echter Adapter.
+- `whatsbot/ports/message_sender.py` — `MessageSendError` hinzu,
+  Protocol-Docstring korrigiert.
+- `tests/unit/test_whatsapp_sender.py` — 16 Tests via
+  `httpx.MockTransport`.
+- `tests/unit/test_main_sender_selection.py` — 11 Tests für
+  `_build_outbound_sender`.
+- `tests/integration/test_whatsapp_sender_circuit.py` — 2 Tests
+  analog zu `test_resilience_circuit_integration.py` für
+  `meta_send`-Breaker.
+- `tests/integration/test_whatsapp_sender_live.py` — 1 Test
+  (skipped default).
+- `.claude/rules/phase-10.md` — Phase-Rules.
+
+**Tests-Stand**: 1572 passed + 1 live-skipped (Baseline Phase-9
+1542 + 30 neue Phase-10-Tests − 1 live-skip). mypy --strict clean
+auf allen 7 Phase-10-Files. ruff clean.
+
+## C10.5 — Live-Re-Deployment + Handy-Test (User-Action)
+
+**Vorgehen am Mac**:
+
+1. Commit anstoßen (Claude fragt nach, wenn Du "commit" sagst —
+   ich mache den Sammel-Commit `feat(phase-10): outbound via
+   WhatsApp Cloud API`).
+2. `launchctl kickstart -k gui/$UID/com.local.whatsbot` — Bot neu
+   starten, damit `main.py` die neue Sender-Selection liest.
+3. `tail -f ~/Library/Logs/whatsbot/app.jsonl | grep -E
+   "outbound_|command_routed"` — Live-Log im Auge behalten.
+4. **Vom Handy `/ping` schicken.**
+5. Erwartung am Handy: `pong · v0.1.0 · uptime Xs ━━━ [project]
+   🟢` innerhalb weniger Sekunden.
+6. Erwartung im Log: Eintrag
+   `outbound_message_sent to_tail4=... body_len=... message_id=wamid.*`.
+7. Bei Fehler: `/errors` vom Handy zeigt die letzten Events;
+   `app.jsonl` greppen auf `outbound_message_failed` + `status_code`.
+
+**Optional Live-Meta-Test am Mac** (nicht nötig für Produktiv,
+aber gute Vorab-Verifikation dass Token + Phone-Number-ID
+stimmen):
+
+```bash
+export WHATSBOT_LIVE_META=1
+export WHATSBOT_LIVE_META_TOKEN="$(security find-generic-password -s whatsbot -a meta-access-token -w)"
+export WHATSBOT_LIVE_META_PHONE_NUMBER_ID="$(security find-generic-password -s whatsbot -a meta-phone-number-id -w)"
+export WHATSBOT_LIVE_META_TO="491716598519"   # Deine Handy-Nummer, keine Plus
+venv/bin/pytest tests/integration/test_whatsapp_sender_live.py -v -s
+```
+
+Wenn der Test grün läuft, landet gleich eine
+`whatsbot phase-10 live test · <timestamp>`-Nachricht am Handy.
+
+## Abbruch-Kriterien während C10.5
+
+- **Handy bekommt nix, Log zeigt kein `outbound_message_sent`**:
+  Ist der Bot überhaupt neu gestartet? `launchctl print
+  gui/$UID/com.local.whatsbot | grep -i state` prüfen, PID
+  vergleichen mit `ps -ax | grep whatsbot`.
+- **`outbound_message_failed status_code=401`**: Access-Token
+  abgelaufen oder falsch. Siehe `docs/RUNBOOK.md` §Secret-Rotation,
+  neues Token generieren via System User in Meta-App.
+- **`status_code=400` mit Meta-Fehlerbody**: Body-Shape stimmt
+  nicht — Log-Inhalt prüfen, evtl. Meta-Docs gegenchecken für
+  v23.0-Änderungen. Phase-10-Rules haben das als Abbruch-
+  Kriterium.
+- **`CircuitOpenError` im Log**: entweder 5 aufeinanderfolgende
+  Fehler gegen Meta (Tunnel-Problem? Netzwerk?), oder der Breaker
+  hing noch aus einer vorigen Session. Bot neu starten = Registry
+  reset. Realistisch: 5 aufeinanderfolgende Failures brauchen
+  aktiven Grund — Root-Cause identifizieren bevor retry.
+
+## C10.5 Live-Debug-Stand (Stand 2026-04-24 07:48)
+
+**Was Live-Test gezeigt hat** (Bot-Kickstart + `/ping` vom Handy):
+
+- ✅ **Adapter sendet echte HTTP-Calls** an Meta Graph:
+  `POST https://graph.facebook.com/v23.0/1130442710144663/messages`.
+  C10.1-Implementation ist korrekt, der Bot ist End-to-End auf
+  die neue Sender-Selection umgeschaltet.
+- ❌ **Meta lehnt jeden Call mit HTTP 401 Unauthorized ab.** Vier
+  `/ping`-Attempts in ~14s, alle vier mit `outbound_message_failed
+  status_code=401` im `app.jsonl`.
+- ✅ **Circuit-Breaker trippt wie designed**: nach 5 Failures
+  (`circuit_opened service=meta_send threshold=5 window_s=60
+  reopens_at=257623.1`). Phase-8-C8.3 Live-beweisen. Folgende
+  `/ping`s werden jetzt short-circuited ohne HTTP.
+
+**Ursache vermutlich** (muss morgen verifiziert werden):
+- **Token abgelaufen** — wahrscheinlich ein Temporary 24h-Token
+  aus der Meta-Dashboard-"API Setup"-Seite statt eines Permanent
+  System-User-Tokens. Token im Keychain fängt mit `EAANWD147E…`
+  an, was Format-mäßig plausibel ist, aber 401 bedeutet Meta
+  erkennt es nicht.
+- Andere Kandidaten: Token hat nicht `whatsapp_business_messaging`-
+  Permission, oder Token gehört zu einer anderen App als die
+  Phone-Number-ID `1130442710144663`.
+
+**Keychain-Verifikation war grün**:
+```
+meta-access-token     → EAANWD147E…  (alle Zeichen da, nicht leer)
+meta-phone-number-id  → 1130442710144663
+```
+
+## Nächster Schritt morgen
+
+1. **Root-Cause verifizieren** mit zwei Curls direkt gegen Meta:
+   ```bash
+   TOKEN=$(security find-generic-password -s whatsbot -a meta-access-token -w)
+   echo "=== Test 1: Token gültig? ==="
+   curl -s "https://graph.facebook.com/v23.0/me" -H "Authorization: Bearer $TOKEN"
+   echo
+   echo "=== Test 2: Token darf diese Phone Number? ==="
+   curl -s "https://graph.facebook.com/v23.0/1130442710144663" -H "Authorization: Bearer $TOKEN"
+   echo
+   ```
+   - Antwort mit `{"error":{"message":"Invalid OAuth access token"…}}` → Token ist tot, neu generieren.
+   - Antwort mit `{"error":{"message":"Unsupported request"/"missing permission"…}}` → Permission fehlt.
+   - Antwort mit `{"id":"…","name":"…"}` bzw.
+     `{"display_phone_number":"…"}` → Token gültig, Problem liegt
+     woanders (dann tiefer graben: App-Modus "Live" vs.
+     "Development", Test-Recipient-Whitelist).
+
+2. **Fix**: in developers.facebook.com → App "wibot" → **WhatsApp** (nicht
+   Facebook Login for Business, das ist ein anderes Produkt!) →
+   **Configuration** oder **API Setup**. Dort:
+   - **System Users** öffnen, User auswählen, **Generate Token**
+     klicken, WhatsApp-App auswählen, Scopes
+     `whatsapp_business_messaging` + `whatsapp_business_management`,
+     **Never Expires** auswählen.
+   - Token-String kopieren.
+
+3. **Keychain updaten**:
+   ```bash
+   security add-generic-password -U -s whatsbot -a meta-access-token -w
+   # (Prompt erscheint — Token einfügen, Enter)
+   ```
+
+4. **Bot neu starten** (löst auch den OPEN Circuit-Breaker, weil
+   Bot-Restart = neue Module-level-Registry):
+   ```bash
+   launchctl kickstart -k gui/$UID/com.local.whatsbot
+   ```
+
+5. **Re-Test**: vom Handy `/ping` → Reply sollte ankommen.
+   Im `app.jsonl`: `outbound_message_sent message_id=wamid.*`.
+
+6. **Phase-10-Schluss-Commit**: wenn Handy-Test grün, machen wir
+   den abschließenden `chore(phase-10): C10.5 live verified`-
+   Commit und setzen C10.5 auf completed.
+
+**Alternative wenn Permanent-Token zu viel Aufwand**: das
+temporäre 24h-Token reicht für Produktiv-Test; wir müssen es
+halt täglich rotieren bis du zum System User kommst. Kein
+Blocker.
+
+## Was NICHT verloren geht beim Schlafen
+
+- Der bisherige Phase-10-Code steht als Commit `feat(phase-10):
+  outbound via WhatsApp Cloud API — C10.5 live debug pending` im
+  main-Branch. 1572 Tests grün, mypy clean, ruff clean.
+- Diese Datei (`current-phase.md`) ist die einzige Quelle, die du
+  morgen mit einem "weiter" brauchst — der Claude der morgen kommt
+  liest sie automatisch beim Session-Start und sieht:
+  Phase-10-Code fertig, C10.5 wartet auf Token-Debug, die zwei
+  Curl-Commands stehen oben, der Fix-Weg ist dokumentiert.
+
+## Ursprünglich (Pre-Phase-10, zur Erinnerung)
+
+Weiter unten steht der Stand vor dem Impl-Debt-Fix
+— nicht mehr relevant für Phase 10, aber für
+historische Debug-Wege hilfreich.
 
 ## Heutige Betriebs-Anpassung (nicht-Code)
 
