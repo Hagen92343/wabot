@@ -2,7 +2,7 @@
 
 Ein persönlicher WhatsApp-Bot, der Claude Code auf deinem Mac fernsteuert. Single-User, kein Enterprise-Scope, kein Cloud-Hosting.
 
-**Status**: Phase 1-9 ✅ — produktiv auf macOS 14+ (Apple Silicon).
+**Status**: Phase 1-10 ✅ — produktiv auf macOS 14+ (Apple Silicon). Live verifiziert 2026-04-24.
 
 ## Was ist das
 
@@ -40,6 +40,7 @@ Siehe [docs/INSTALL.md](docs/INSTALL.md) für das komplette Setup (Brew-Pakete, 
 | Thema | Datei |
 |---|---|
 | Vollständige Installation | [docs/INSTALL.md](docs/INSTALL.md) |
+| Tag-zu-Tag-Betrieb | [docs/OPERATING.md](docs/OPERATING.md) |
 | Betrieb & Recovery | [docs/RUNBOOK.md](docs/RUNBOOK.md) |
 | Security-Modell | [docs/SECURITY.md](docs/SECURITY.md) |
 | Die drei Modi | [docs/MODES.md](docs/MODES.md) |
