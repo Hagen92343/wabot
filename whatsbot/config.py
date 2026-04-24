@@ -20,7 +20,7 @@ import os
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from whatsbot.ports.secrets_provider import SecretsProvider, verify_all_present
 
@@ -54,7 +54,15 @@ _DEFAULT_WHISPER_MODEL_PATH = (
 
 
 class Settings(BaseModel):
-    """Runtime configuration. Stable for the lifetime of one process."""
+    """Runtime configuration. Stable for the lifetime of one process.
+
+    ``extra="forbid"`` makes typo'd field names raise immediately instead
+    of silently falling back to the default. A Phase-11 E2E test caught
+    this the hard way when ``state_db_path`` (wrong name) was silently
+    ignored and the test wrote to the live DB.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     env: Environment = Environment.PROD
     dry_run: bool = False
