@@ -20,7 +20,7 @@ CREATE TABLE projects (
 
 CREATE TABLE claude_sessions (
     project_name TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,
-    session_id TEXT UNIQUE,
+    session_id TEXT,
     transcript_path TEXT,
     started_at TEXT NOT NULL,
     turns_count INTEGER DEFAULT 0,
@@ -30,6 +30,10 @@ CREATE TABLE claude_sessions (
     last_activity_at TEXT,
     current_mode TEXT DEFAULT 'normal' CHECK(current_mode IN ('normal', 'strict', 'yolo'))
 );
+-- session_id: NULL ⇒ Claude has not produced an ID yet (placeholder before
+-- first --resume / startup discovery). Empty string was the historical
+-- placeholder; migration 002 normalises it to NULL. Uniqueness on real
+-- IDs is enforced via the partial index below — see Mini-Phase 12.
 
 CREATE TABLE session_locks (
     project_name TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,
@@ -96,6 +100,8 @@ CREATE TABLE allow_rules (
     FOREIGN KEY (project_name) REFERENCES projects(name) ON DELETE CASCADE
 );
 
+CREATE UNIQUE INDEX idx_claude_sessions_session_id
+    ON claude_sessions(session_id) WHERE session_id IS NOT NULL;
 CREATE INDEX idx_locks_activity ON session_locks(last_activity_at);
 CREATE INDEX idx_limits_reset ON max_limits(reset_at_ts);
 CREATE INDEX idx_pending_deadline ON pending_confirmations(deadline_ts);

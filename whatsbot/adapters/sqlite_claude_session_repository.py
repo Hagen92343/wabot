@@ -34,7 +34,7 @@ class SqliteClaudeSessionRepository:
             "current_mode = excluded.current_mode",
             (
                 session.project_name,
-                session.session_id,
+                session.session_id or None,
                 session.transcript_path,
                 _iso(session.started_at),
                 session.turns_count,

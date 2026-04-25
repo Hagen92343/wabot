@@ -85,7 +85,8 @@ class TestUpsertGet:
         self, conn: sqlite3.Connection, repo: SqliteClaudeSessionRepository
     ) -> None:
         # Add more projects so FK passes for each mode variant.
-        # Session IDs must be distinct — the column is UNIQUE.
+        # Distinct non-empty session_ids — the partial unique index
+        # (Mini-Phase 12) enforces uniqueness only on non-NULL values.
         project_repo = SqliteProjectRepository(conn)
         for name, mode, sid in [
             ("beta", Mode.STRICT, "sess-beta"),
@@ -220,3 +221,77 @@ def test_deleting_project_cascades_to_claude_session(
     repo.upsert(_sample())
     SqliteProjectRepository(conn).delete("alpha")
     assert repo.get("alpha") is None
+
+
+# ---- Mini-Phase 12: partial unique index on session_id ---------------
+
+
+class TestSessionIdPartialUnique:
+    """Empty session_id is the placeholder for "Claude has not produced
+    an ID yet". Two such rows used to crash on the column-level UNIQUE
+    constraint — Mini-Phase 12 replaced it with a partial unique index
+    and normalises empty strings to NULL on insert."""
+
+    def _seed_extra_project(
+        self, conn: sqlite3.Connection, name: str
+    ) -> None:
+        SqliteProjectRepository(conn).create(
+            Project(
+                name=name,
+                source_mode=SourceMode.EMPTY,
+                created_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+                mode=Mode.NORMAL,
+            )
+        )
+
+    def test_two_empty_session_ids_can_coexist(
+        self, conn: sqlite3.Connection, repo: SqliteClaudeSessionRepository
+    ) -> None:
+        self._seed_extra_project(conn, "beta")
+        repo.upsert(_sample(project="alpha", session_id=""))
+        repo.upsert(_sample(project="beta", session_id=""))
+        assert repo.get("alpha") is not None
+        assert repo.get("beta") is not None
+
+    def test_empty_session_id_persists_as_null(
+        self, conn: sqlite3.Connection, repo: SqliteClaudeSessionRepository
+    ) -> None:
+        repo.upsert(_sample(session_id=""))
+        raw = conn.execute(
+            "SELECT session_id FROM claude_sessions WHERE project_name = 'alpha'"
+        ).fetchone()
+        assert raw["session_id"] is None
+
+    def test_domain_layer_still_sees_empty_string_for_null(
+        self, repo: SqliteClaudeSessionRepository
+    ) -> None:
+        repo.upsert(_sample(session_id=""))
+        got = repo.get("alpha")
+        assert got is not None
+        assert got.session_id == ""
+
+    def test_two_identical_real_session_ids_still_rejected(
+        self, conn: sqlite3.Connection, repo: SqliteClaudeSessionRepository
+    ) -> None:
+        self._seed_extra_project(conn, "beta")
+        repo.upsert(_sample(project="alpha", session_id="sess-real"))
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.upsert(_sample(project="beta", session_id="sess-real"))
+
+    def test_partial_index_exists_in_schema(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        rows = conn.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='claude_sessions'"
+        ).fetchall()
+        names = {r["name"] for r in rows}
+        assert "idx_claude_sessions_session_id" in names
+        idx_sql = next(
+            r["sql"]
+            for r in rows
+            if r["name"] == "idx_claude_sessions_session_id"
+        )
+        # Partial — uniqueness only on non-NULL values.
+        assert "WHERE" in idx_sql.upper()
+        assert "NOT NULL" in idx_sql.upper()
