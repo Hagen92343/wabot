@@ -5,6 +5,45 @@ neueste oben. Sieh dazu `.claude/rules/current-phase.md` für den Live-Stand.
 
 ## [Unreleased]
 
+### Mini-Phase 12 — `claude_sessions.session_id` partial unique index
+
+**Problem (post Phase-11)**: `session_id TEXT UNIQUE` aus Phase 4 verbot
+zwei Rows mit `session_id=''`. Die Domain benutzt aber den leeren
+String als Platzhalter, bevor Claude eine echte ID zurückgibt. Sobald
+ein zweites Projekt frisch via `/p` startet, kollidiert der INSERT mit
+`UNIQUE constraint failed: claude_sessions.session_id`. Phase 11 hat
+das durch Live-Bot-Restart sichtbar gemacht (`scratch`-Row blockierte
+jedes weitere Projekt).
+
+**Fix**: Column-level UNIQUE durch Partial Unique Index ersetzen, der
+nur auf non-NULL-Werte greift. Empty strings beim Insert auf NULL
+normalisieren — domain layer (Read-Pfad) konvertiert NULL→`""` schon.
+Schutz vor doppelten *echten* IDs bleibt erhalten.
+
+- `sql/migrations/002_session_id_partial_unique.sql`: rename-copy-
+  drop-rename Pattern (analog 001), `NULLIF(session_id, '')`,
+  `CREATE UNIQUE INDEX … WHERE session_id IS NOT NULL`.
+- `sql/schema.sql` auf gleichen Endzustand (Fresh-Install bypasst
+  Migration → muss direkt korrekt sein).
+- `sqlite_claude_session_repository.upsert`: `session.session_id or
+  None` statt `session.session_id`.
+- 9 neue Tests (4 migration, 5 repo). Bestehende Migration-Tests
+  auf `[1, 2]` + `user_version == 2` aktualisiert.
+
+**Live-Migration**: bei Bot-Restart automatisch via `run_migrations`.
+Vorher: scratch session_id=''. Nachher: scratch session_id=NULL,
+wabot-ID intakt, partial index präsent.
+
+**Bekannter Hygienepunkt (separater Scope)**: einige
+`tests/integration/`-Tests bauen `Settings(env=Environment.PROD)` ohne
+`db_path`-Override. `Settings.db_path` defaultet auf den Live-Pfad,
+also läuft `open_state_db` in der Test-Suite tatsächlich auf der
+Live-DB. C11.5 (`extra=forbid`) hat den Typo-Fall gefixt, aber nicht
+den fehlenden-Field-Fall. Das hat heute die Live-Migration ungewollt
+**vor dem Bot-Restart** ausgelöst (funktional kein Schaden — DB war
+im Zielzustand). Fix-Kandidat: Test-DB-Pfad in conftest auf tmp_path
+zwingen, oder `Settings.db_path` zur Pflicht machen wenn `env != TEST`.
+
 ### Phase 11 — `/import` bestehende Projekte anhängen (complete) ✅
 
 Das MVP (Phase 1-10) konnte Projekte nur per `/new` (leerer Ordner

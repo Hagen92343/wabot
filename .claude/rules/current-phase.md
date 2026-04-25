@@ -1,17 +1,66 @@
 # Aktueller Stand
 
-**Projekt-Status**: **Phase 1-11 Code + Tests komplett ✅.** Bot
-produktiv seit 2026-04-24 15:25 UTC (Phase 10 /ping → Handy). Phase 11
-fügt `/import <name> <absoluter-pfad>` hinzu und ist code-seitig
-vollständig: Migration auf Live-DB gelaufen, Bot läuft mit Phase-11-
-Code (PID 91727 zum Zeitpunkt des letzten Kickstart).
+**Projekt-Status**: **Phase 1-11 + Mini-Phase 12 Code + Tests komplett
+✅.** Bot produktiv seit 2026-04-24 15:25 UTC. Phase 11 fügte
+`/import` hinzu (Migration 001). Mini-Phase 12 fixt den
+`claude_sessions.session_id UNIQUE`-Bug (Migration 002, partial
+unique index). Bot läuft mit Mini-Phase-12-Code (PID 98777).
 
-**C11.6 Live-Verifikation vom Handy — ausstehend bei nächster Session.**
-Siehe Abschnitt "Wie für nächste Session weitermachen" unten für die
-4 konkreten Handy-Tests (Import, Listing, Claude im echten Repo, /rm
-non-destructive).
+**C11.6 Live-Verifikation vom Handy — ausstehend.** Siehe Abschnitt
+"Wie für nächste Session weitermachen" unten für die 4 konkreten
+Handy-Tests. Mini-Phase 12 hat den UNIQUE-Blocker für Test 3
+(`/p wabot ...`) beseitigt — sollte jetzt durchlaufen.
 
 SIM-Port-Lock beim Carrier bleibt User-Action außerhalb Code.
+
+## Mini-Phase 12 — `claude_sessions.session_id` partial unique
+
+**Trigger**: Beim ersten Phase-11-Bot-Restart kollidierte ein
+`claude_sessions`-INSERT mit `UNIQUE constraint failed:
+claude_sessions.session_id`. Domain benutzt `''` als Platzhalter,
+zwei `''`-Rows verbietet aber die UNIQUE-Spalte. Phase-4-Erbe.
+
+**Geliefert (2026-04-25)**:
+- Migration 002: rename-copy-drop-rename, `NULLIF(session_id, '')`,
+  `CREATE UNIQUE INDEX … ON claude_sessions(session_id) WHERE
+  session_id IS NOT NULL`. PRAGMA user_version=2.
+- `sql/schema.sql` auf gleichen Endzustand (Fresh-Install bypasst
+  Migration).
+- `sqlite_claude_session_repository.upsert`: `session.session_id or
+  None` — leere Strings landen als NULL auf Disk; Read-Pfad
+  konvertiert NULL→`""` zurück (Z. 145, unverändert).
+- 9 neue Tests (4 migration, 5 repo). Bestehende Migration-Tests
+  auf `[1, 2]` + `user_version == 2` aktualisiert.
+
+**Tests-Stand**: 1640 passed + 1 live-skipped + 3 pre-existing
+integration-failures (siehe Hygienepunkt unten). mypy --strict clean
+auf 120 source files, ruff clean.
+
+**Live-Verifikation**: user_version=2, scratch session_id=NULL,
+wabot-ID intakt, partial index präsent, integrity_check ok. Bot
+restart sauber, kein neuer IntegrityError im stderr.
+
+## Bekannte Hygienepunkte (post Mini-Phase 12)
+
+1. **Settings.db_path-Default leakt in Tests**: einige
+   `tests/integration/`-Tests bauen `Settings(env=Environment.PROD)`
+   ohne `db_path`-Override. `Settings.db_path` defaultet auf den
+   Live-Pfad → `open_state_db` läuft tatsächlich auf der Live-DB.
+   C11.5 (`extra=forbid`) hat den Typo-Fall gefixt, aber nicht den
+   fehlenden-Field-Fall. Heute hat das die Mini-Phase-12-Migration
+   ungewollt vor dem Bot-Restart ausgelöst (funktional kein Schaden,
+   DB war im Zielzustand). Fix-Kandidat: conftest-Fixture die
+   `db_path` auf tmp_path zwingt, oder Pflicht-Override für
+   `env != TEST` in `Settings`.
+2. **3 pre-existing integration-failures**:
+   `test_command_still_dispatches_after_injection_detection`,
+   `test_unknown_command_still_replies_with_hint`,
+   `test_image_without_active_project_prompts_user_to_set_one`.
+   Symptom: `recorder.sent` hat 20+ Messages statt 1 — sieht nach
+   Cross-Test-Pollution aus (geteilter MessageSender-Singleton oder
+   Module-State-Leak). Reproduzieren auf bare `main` ohne meine
+   Mini-Phase-12-Changes — also nicht von mir verursacht. Separate
+   Cleanup-Phase.
 
 ## Deployment-Stand (Stand 2026-04-23 abend)
 
