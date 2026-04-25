@@ -4,8 +4,21 @@ Two principles:
 1. Tests must NEVER touch the user's real macOS Keychain. The ``mock_keyring``
    fixture monkeypatches ``keyring.{get,set,delete}_password`` with a per-test
    in-memory dict so the production adapter under test runs unchanged.
-2. Tests must NEVER touch the real state-DB. Use the ``tmp_db_path`` fixture
-   for an isolated DB file under ``tmp_path``.
+2. Tests must NEVER touch the real state-DB or backup dir. The autouse
+   ``_redirect_default_paths`` fixture redirects
+   ``whatsbot.config._DEFAULT_DB_PATH`` and
+   ``whatsbot.config._DEFAULT_BACKUP_DIR`` to ``tmp_path`` for every test,
+   so any code path that falls back to the defaults — including
+   ``Settings(env=PROD)`` without a ``db_path`` override — lands in
+   ephemeral test storage. Add ``@pytest.mark.live_paths`` to opt out
+   (only for tests that explicitly assert on the production defaults).
+
+   Mini-Phase 12 documented this as the ``Settings.db_path``-default
+   leak: ``create_app(Settings(env=PROD))`` in integration tests would
+   silently open ``~/Library/Application Support/whatsbot/state.db``,
+   triggering live migrations and (worse) wiring the transcript watcher
+   onto the running production session. The autouse fixture closes that
+   hole at the source.
 """
 
 from __future__ import annotations
@@ -17,6 +30,37 @@ from pathlib import Path
 import pytest
 import structlog
 from keyring.errors import PasswordDeleteError
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "live_paths: opt out of the per-test redirection of "
+        "_DEFAULT_DB_PATH/_DEFAULT_BACKUP_DIR (very rarely needed — "
+        "only for tests that explicitly assert on the production paths).",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _redirect_default_paths(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Point ``whatsbot.config._DEFAULT_DB_PATH`` and ``_DEFAULT_BACKUP_DIR``
+    at ``tmp_path`` for the duration of this test.
+
+    ``Settings.db_path`` is declared with ``Field(default_factory=lambda:
+    _DEFAULT_DB_PATH)`` — the lambda resolves the module attribute at
+    instantiation time, so monkeypatching the attribute before the
+    Settings() call is enough to redirect the default.
+    """
+    if request.node.get_closest_marker("live_paths") is not None:
+        return
+    safe_db = tmp_path / "state.db"
+    safe_backup = tmp_path / "backups"
+    monkeypatch.setattr("whatsbot.config._DEFAULT_DB_PATH", safe_db)
+    monkeypatch.setattr("whatsbot.config._DEFAULT_BACKUP_DIR", safe_backup)
 
 
 @pytest.fixture(autouse=True)

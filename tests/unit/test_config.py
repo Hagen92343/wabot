@@ -72,6 +72,7 @@ def test_from_env_parses_dry_run_flag(
     assert Settings.from_env().dry_run is expected
 
 
+@pytest.mark.live_paths
 def test_default_paths_under_user_home() -> None:
     s = Settings()
     assert "Library/Logs/whatsbot" in str(s.log_dir)
