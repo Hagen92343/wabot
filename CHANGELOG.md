@@ -34,17 +34,28 @@ Schutz vor doppelten *echten* IDs bleibt erhalten.
 Vorher: scratch session_id=''. Nachher: scratch session_id=NULL,
 wabot-ID intakt, partial index präsent.
 
-**Bekannter Hygienepunkt (separater Scope)**: einige
-`tests/integration/`-Tests bauen `Settings(env=Environment.PROD)` ohne
-`db_path`-Override. `Settings.db_path` defaultet auf den Live-Pfad,
-also läuft `open_state_db` in der Test-Suite tatsächlich auf der
-Live-DB. C11.5 (`extra=forbid`) hat den Typo-Fall gefixt, aber nicht
-den fehlenden-Field-Fall. Das hat heute die Live-Migration ungewollt
-**vor dem Bot-Restart** ausgelöst (funktional kein Schaden — DB war
-im Zielzustand). Fix-Kandidat: Test-DB-Pfad in conftest auf tmp_path
-zwingen, oder `Settings.db_path` zur Pflicht machen wenn `env != TEST`.
+### Hygiene-Fix — Settings.db_path-Test-Leak geschlossen
 
-### Phase 11 — `/import` bestehende Projekte anhängen (complete) ✅
+Der in Mini-Phase 12 dokumentierte Hygienepunkt ist jetzt zu. Autouse-
+Fixture in `tests/conftest.py` patcht `whatsbot.config._DEFAULT_DB_PATH`
+und `_DEFAULT_BACKUP_DIR` per Test auf `tmp_path`. Tests, die
+`Settings(env=Environment.PROD)` ohne `db_path`-Override bauen, landen
+jetzt automatisch in ephemerer Test-Storage statt auf der Live-DB.
+Opt-out via `@pytest.mark.live_paths` — aktuell genutzt nur von
+`test_default_paths_under_user_home`.
+
+Nebenbei: drei Integration-Failures, die wir in Mini-Phase 12 als
+"pre-existing, separater Scope" notiert hatten, waren in Wahrheit
+Symptome desselben Leaks. Bot-under-Test verband sich auf die Live-DB,
+fand die laufende `wabot`-claude_session, hängte den Transcript-
+Watcher an die *aktive Claude-Code-Session dieses Gesprächs*, und
+flutete die `RecordingSender` mit 20+ `auto_compact_sent`-Events.
+Mit dem Fixture-Patch sind alle drei grün.
+
+Tests-Stand: **1640 passed + 1 live-skipped** (vorher 1637 + 3
+failed). mypy --strict + ruff clean.
+
+### Mini-Phase 12 — `claude_sessions.session_id` partial unique index
 
 Das MVP (Phase 1-10) konnte Projekte nur per `/new` (leerer Ordner
 in `~/projekte/`) oder `/new git <url>` (frischer Clone dorthin)

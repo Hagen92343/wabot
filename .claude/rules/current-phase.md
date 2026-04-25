@@ -1,10 +1,12 @@
 # Aktueller Stand
 
-**Projekt-Status**: **Phase 1-11 + Mini-Phase 12 Code + Tests komplett
-✅.** Bot produktiv seit 2026-04-24 15:25 UTC. Phase 11 fügte
-`/import` hinzu (Migration 001). Mini-Phase 12 fixt den
-`claude_sessions.session_id UNIQUE`-Bug (Migration 002, partial
-unique index). Bot läuft mit Mini-Phase-12-Code (PID 98777).
+**Projekt-Status**: **Phase 1-11 + Mini-Phase 12 + Hygiene-Fix Code +
+Tests komplett ✅.** Bot produktiv seit 2026-04-24 15:25 UTC. Phase 11
+fügte `/import` hinzu (Migration 001). Mini-Phase 12 fixt den
+`claude_sessions.session_id UNIQUE`-Bug (Migration 002, partial unique
+index). Hygiene-Fix schließt das Settings.db_path-Test-Leak
+(autouse-conftest-Fixture). Tests-Stand: 1640 + 1 live-skipped, alle
+grün. Bot läuft mit Mini-Phase-12-Code (PID 98777).
 
 **C11.6 Live-Verifikation vom Handy — ausstehend.** Siehe Abschnitt
 "Wie für nächste Session weitermachen" unten für die 4 konkreten
@@ -40,27 +42,27 @@ auf 120 source files, ruff clean.
 wabot-ID intakt, partial index präsent, integrity_check ok. Bot
 restart sauber, kein neuer IntegrityError im stderr.
 
-## Bekannte Hygienepunkte (post Mini-Phase 12)
+## Hygiene-Fix — Settings.db_path-Test-Leak geschlossen ✅
 
-1. **Settings.db_path-Default leakt in Tests**: einige
-   `tests/integration/`-Tests bauen `Settings(env=Environment.PROD)`
-   ohne `db_path`-Override. `Settings.db_path` defaultet auf den
-   Live-Pfad → `open_state_db` läuft tatsächlich auf der Live-DB.
-   C11.5 (`extra=forbid`) hat den Typo-Fall gefixt, aber nicht den
-   fehlenden-Field-Fall. Heute hat das die Mini-Phase-12-Migration
-   ungewollt vor dem Bot-Restart ausgelöst (funktional kein Schaden,
-   DB war im Zielzustand). Fix-Kandidat: conftest-Fixture die
-   `db_path` auf tmp_path zwingt, oder Pflicht-Override für
-   `env != TEST` in `Settings`.
-2. **3 pre-existing integration-failures**:
-   `test_command_still_dispatches_after_injection_detection`,
-   `test_unknown_command_still_replies_with_hint`,
-   `test_image_without_active_project_prompts_user_to_set_one`.
-   Symptom: `recorder.sent` hat 20+ Messages statt 1 — sieht nach
-   Cross-Test-Pollution aus (geteilter MessageSender-Singleton oder
-   Module-State-Leak). Reproduzieren auf bare `main` ohne meine
-   Mini-Phase-12-Changes — also nicht von mir verursacht. Separate
-   Cleanup-Phase.
+Mini-Phase 12 hatte das als "Hygienepunkt 1+2" notiert. Beide sind
+jetzt zu, weil sie die gleiche Wurzel hatten.
+
+**Fix**: autouse-Fixture in `tests/conftest.py` patcht
+`whatsbot.config._DEFAULT_DB_PATH` und `_DEFAULT_BACKUP_DIR` per
+Test auf `tmp_path`. Tests die `Settings(env=Environment.PROD)` ohne
+`db_path`-Override bauen, landen jetzt automatisch in ephemerer Test-
+Storage. Opt-out via `@pytest.mark.live_paths` — aktuell nur
+`test_default_paths_under_user_home` braucht das.
+
+**Rätsel der "20+ Messages"**: die 3 pre-existing integration-failures
+hatten dieselbe Wurzel. Bot-under-Test verband sich auf die Live-DB,
+fand die laufende `wabot`-claude_session, hängte den Transcript-
+Watcher an die *aktive Claude-Code-Session dieses Gesprächs*, und
+flutete den `RecordingSender` mit historischen `auto_compact_sent`-
+Events. Mit dem Fixture-Patch grün.
+
+**Tests-Stand**: 1640 passed + 1 live-skipped. mypy --strict + ruff
+clean.
 
 ## Deployment-Stand (Stand 2026-04-23 abend)
 
